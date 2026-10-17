@@ -142,6 +142,17 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
       MergeScalar(cfg.largeFunctionThreshold, *v, "analysis.large_function_threshold");
     }
 
+    // dataSections -- push_back then deduplicate at end
+    if (auto sections = (*analysisTable)["data_sections"].as_array()) {
+      for (const auto& elem : *sections) {
+        if (auto val = elem.value<std::string>()) {
+          cfg.dataSections.push_back(*val);
+        } else {
+          REXCODEGEN_ERROR("Invalid analysis.data_sections entry: expected section name string");
+        }
+      }
+    }
+
     // exceptionHandlerFuncHints -- push_back then deduplicate at end
     if (auto handlers = (*analysisTable)["exception_handler_funcs"].as_array()) {
       for (const auto& elem : *handlers) {
@@ -467,6 +478,11 @@ bool FinalizeConfig(RecompilerConfig& cfg) {
     cfg.exceptionHandlerFuncHints.erase(
         std::unique(cfg.exceptionHandlerFuncHints.begin(), cfg.exceptionHandlerFuncHints.end()),
         cfg.exceptionHandlerFuncHints.end());
+  }
+  if (!cfg.dataSections.empty()) {
+    std::sort(cfg.dataSections.begin(), cfg.dataSections.end());
+    cfg.dataSections.erase(std::unique(cfg.dataSections.begin(), cfg.dataSections.end()),
+                           cfg.dataSections.end());
   }
 
   bool ok = true;
