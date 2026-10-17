@@ -55,6 +55,15 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                     "Read data written by memory export in shaders on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(vulkan_log_resolves, false, "GPU/Vulkan",
+                    "Log every resolve destination and the swap source address (debugging)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+namespace {
+// Resolves of the current frame, for vulkan_log_resolves.
+std::vector<std::pair<uint32_t, uint32_t>> debug_frame_resolves;
+}  // namespace
+
 REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                     "When async shader compilation is enabled, skip presenting frames that "
                     "used placeholder pipelines to avoid visible flashing")
@@ -2304,6 +2313,21 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     return;
   }
 
+  if (REXCVAR_GET(vulkan_log_resolves)) {
+    xenos::xe_gpu_texture_fetch_t fetch = register_file_->GetTextureFetch(0);
+    REXGPU_INFO("SWAP frame={} frontbuffer={:08X} {}x{} fetch0_base={:08X} fetch0_format={} {}x{}",
+                frame_current_, frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
+                uint32_t(fetch.base_address) << 12, uint32_t(fetch.format),
+                uint32_t(fetch.size_2d.width) + 1, uint32_t(fetch.size_2d.height) + 1);
+    if (frame_current_ % 60 == 0) {
+      bool dump = frame_current_ % 300 == 0;
+      for (const auto& [address, length] : debug_frame_resolves) {
+        LogGuestMemoryForDebugging("resolve", address, length, dump);
+      }
+    }
+    debug_frame_resolves.clear();
+  }
+
   SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
 
   // Obtain the actual swap source texture size (resolution-scaled if it's a
@@ -4381,6 +4405,45 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
   return true;
 }
 
+void VulkanCommandProcessor::LogResolveForDebugging(bool resolved, uint32_t written_address,
+                                                    uint32_t written_length) {
+  if (!REXCVAR_GET(vulkan_log_resolves)) {
+    return;
+  }
+  auto copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+  REXGPU_INFO("RESOLVE frame={} ok={} dest={:08X} length={:X} format={}", frame_current_,
+              resolved, written_address, written_length,
+              uint32_t(copy_dest_info.copy_dest_format));
+  if (resolved && written_length) {
+    debug_frame_resolves.emplace_back(written_address, written_length);
+  }
+}
+
+void VulkanCommandProcessor::LogGuestMemoryForDebugging(const char* what, uint32_t address,
+                                                        uint32_t length, bool dump) {
+  const uint8_t* data = memory_->TranslatePhysical<const uint8_t*>(address);
+  if (!data) {
+    return;
+  }
+  uint64_t nonzero = 0, sums[4] = {};
+  for (uint32_t i = 0; i < length; ++i) {
+    nonzero += data[i] != 0;
+    sums[i & 3] += data[i];
+  }
+  uint32_t pixels = std::max(length / 4, uint32_t(1));
+  REXGPU_INFO("  {} {:08X}+{:X}: {:.1f}% nonzero bytes, byte means {} {} {} {}", what, address,
+              length, 100.0 * nonzero / std::max(length, uint32_t(1)), sums[0] / pixels,
+              sums[1] / pixels, sums[2] / pixels, sums[3] / pixels);
+  if (dump) {
+    std::string path = "run/guest_" + std::to_string(frame_current_) + "_" +
+                       fmt::format("{:08X}", address) + ".bin";
+    if (FILE* file = std::fopen(path.c_str(), "wb")) {
+      std::fwrite(data, 1, length, file);
+      std::fclose(file);
+    }
+  }
+}
+
 bool VulkanCommandProcessor::IssueCopy() {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
@@ -4392,9 +4455,11 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
   if (readback_mode == ReadbackResolveMode::kDisabled) {
-    uint32_t written_address, written_length;
-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
-                                         written_address, written_length);
+    uint32_t written_address = 0, written_length = 0;
+    bool resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+                                                  written_address, written_length);
+    LogResolveForDebugging(resolved, written_address, written_length);
+    return resolved;
   }
 
   return IssueCopy_ReadbackResolvePath();
@@ -4405,9 +4470,11 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
-  uint32_t written_address, written_length;
-  if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
-                                     written_length)) {
+  uint32_t written_address = 0, written_length = 0;
+  bool resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+                                                written_address, written_length);
+  LogResolveForDebugging(resolved, written_address, written_length);
+  if (!resolved) {
     return false;
   }
 

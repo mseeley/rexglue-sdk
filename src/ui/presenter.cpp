@@ -10,6 +10,8 @@
  */
 
 #include <algorithm>
+#include <cstdio>
+#include <string>
 #include <atomic>
 #include <cctype>
 #include <utility>
@@ -28,6 +30,9 @@
 
 REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
+
+REXCVAR_DEFINE_BOOL(present_log_paints, false, "UI/Presenter",
+                    "Log guest output refreshes and paint results (debugging)");
 
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
@@ -558,9 +563,21 @@ bool Presenter::RefreshGuestOutput(
   writable_properties.display_aspect_ratio_y = display_aspect_ratio_y;
   writable_properties.is_8bpc = false;
   bool is_active = writable_properties.IsActive();
+  static std::atomic<uint32_t> debug_refresh_count{0};
+  uint32_t debug_refresh_index = debug_refresh_count.fetch_add(1, std::memory_order_relaxed);
+  bool debug_log = REXCVAR_GET(present_log_paints) &&
+                   (debug_refresh_index < 10 || debug_refresh_index % 120 == 0);
+  if (debug_log) {
+    REXLOG_INFO("PRESENT refresh #{} {}x{} active={} paint_mode={} connection={}",
+                debug_refresh_index, frontbuffer_width, frontbuffer_height, is_active,
+                int(paint_mode_), int(surface_paint_connection_state_));
+  }
   if (is_active) {
     if (!RefreshGuestOutputImpl(guest_output_mailbox_writable_, frontbuffer_width,
                                 frontbuffer_height, refresher, writable_properties.is_8bpc)) {
+      if (debug_log) {
+        REXLOG_INFO("PRESENT refresh #{} failed", debug_refresh_index);
+      }
       // If failed to refresh, don't send the currently writable image to the
       // mailbox as it may be in an undefined state. Don't disable the guest
       // output either though because the failure may be something transient.
@@ -611,6 +628,37 @@ bool Presenter::RefreshGuestOutput(
     // Take the image other than the last acquired one and the new one,
     // currently not accessible to the host presentation.
     guest_output_mailbox_writable_ = (3 - last_acquired - guest_output_mailbox_writable_) % 3;
+  }
+
+  if (REXCVAR_GET(present_log_paints) && is_active && debug_refresh_index % 300 == 150) {
+    RawImage capture;
+    if (CaptureGuestOutput(capture)) {
+      uint64_t sums[3] = {};
+      std::string path = "run/presenter_" + std::to_string(debug_refresh_index) + ".ppm";
+      FILE* file = std::fopen(path.c_str(), "wb");
+      if (file) {
+        std::fprintf(file, "P6\n%u %u\n255\n", capture.width, capture.height);
+      }
+      for (uint32_t y = 0; y < capture.height; ++y) {
+        const uint8_t* row = capture.data.data() + y * capture.stride;
+        for (uint32_t x = 0; x < capture.width; ++x) {
+          for (uint32_t c = 0; c < 3; ++c) {
+            sums[c] += row[x * 4 + c];
+          }
+          if (file) {
+            std::fwrite(row + x * 4, 1, 3, file);
+          }
+        }
+      }
+      if (file) {
+        std::fclose(file);
+      }
+      uint64_t pixels = std::max(uint64_t(capture.width) * capture.height, uint64_t(1));
+      REXLOG_INFO("PRESENT capture #{} {}x{} means {} {} {}", debug_refresh_index, capture.width,
+                  capture.height, sums[0] / pixels, sums[1] / pixels, sums[2] / pixels);
+    } else {
+      REXLOG_INFO("PRESENT capture #{} failed", debug_refresh_index);
+    }
   }
 
   // Trigger the presentation on the host.
@@ -1498,6 +1546,14 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+  if (REXCVAR_GET(present_log_paints)) {
+    static std::atomic<uint32_t> debug_paint_count{0};
+    uint32_t debug_paint_index = debug_paint_count.fetch_add(1, std::memory_order_relaxed);
+    if (debug_paint_index < 10 || debug_paint_index % 120 == 0) {
+      REXLOG_INFO("PRESENT paint #{} ui_drawers={} result={}", debug_paint_index,
+                  execute_ui_drawers, int(result));
+    }
+  }
   switch (result) {
     case PaintResult::kPresented:
       surface_paint_connection_was_optimal_at_successful_paint_ = true;
