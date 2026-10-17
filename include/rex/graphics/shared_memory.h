@@ -33,6 +33,9 @@ class SharedMemory {
   virtual void ClearCache();
   void SetSystemPageBlocksValidWithGpuDataWritten();
   void InvalidateAllPages();
+  // Fires every watch as if the CPU had written all memory, so all textures
+  // reload from guest memory. For debugging CPU write tracking.
+  void FireAllWatchesForDebugging() { FireWatches(0, (kBufferSize - 1) >> page_size_log2_, false); }
 
   typedef void (*GlobalWatchCallback)(const std::unique_lock<std::recursive_mutex>& global_lock,
                                       void* context, uint32_t address_first, uint32_t address_last,
