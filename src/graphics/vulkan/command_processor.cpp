@@ -55,6 +55,11 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                     "Read data written by memory export in shaders on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(vulkan_invalidate_textures_every_frame, false, "GPU/Vulkan",
+                    "Reload every texture from guest memory each frame (debugging CPU write "
+                    "tracking; slow)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(vulkan_log_resolves, false, "GPU/Vulkan",
                     "Log every resolve destination and the swap source address (debugging)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -5514,6 +5519,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   if (is_closing_frame) {
     if (REXCVAR_GET(clear_memory_page_state) && shared_memory_) {
       shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
+    }
+    if (REXCVAR_GET(vulkan_invalidate_textures_every_frame) && shared_memory_) {
+      shared_memory_->FireAllWatchesForDebugging();
     }
     frame_open_ = false;
     // Submission already closed now, so minus 1.
