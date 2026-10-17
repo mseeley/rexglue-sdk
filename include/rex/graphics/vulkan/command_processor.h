@@ -426,6 +426,9 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void ClearTransientDescriptorPools();
   bool IssueCopy_ReadbackResolvePath();
+  // vulkan_log_resolves helpers.
+  void LogResolveForDebugging(bool resolved, uint32_t written_address, uint32_t written_length);
+  void LogGuestMemoryForDebugging(const char* what, uint32_t address, uint32_t length, bool dump);
   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
 

@@ -46,6 +46,8 @@
 #include <rex/ui/surface_mac.h>
 #endif
 
+REXCVAR_DECLARE(bool, present_log_paints);
+
 REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
                     "Clear render pass during presentation");
 
@@ -1645,13 +1647,38 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
     // multiple threads can't paint the main target at the same time).
   }
 
-  if (guest_output_image) {
+  if (!guest_output_image && REXCVAR_GET(present_log_paints)) {
+    static std::atomic<uint32_t> debug_no_image_count{0};
+    uint32_t debug_no_image_index = debug_no_image_count.fetch_add(1, std::memory_order_relaxed);
+    if (debug_no_image_index < 10 || debug_no_image_index % 120 == 0) {
+      REXLOG_INFO("PRESENT paint #{} without a guest output image", debug_no_image_index);
+    }
+  }
+    if (guest_output_image) {
     VkExtent2D max_framebuffer_extent =
         util::GetMax2DFramebufferExtent(vulkan_device_->properties());
     GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
         guest_output_properties, paint_context_.swapchain_extent.width,
         paint_context_.swapchain_extent.height, max_framebuffer_extent.width,
         max_framebuffer_extent.height, guest_output_paint_config);
+    if (REXCVAR_GET(present_log_paints)) {
+      static std::atomic<uint32_t> debug_flow_count{0};
+      uint32_t debug_flow_index = debug_flow_count.fetch_add(1, std::memory_order_relaxed);
+      if (debug_flow_index < 10 || debug_flow_index % 120 == 0) {
+        REXLOG_INFO(
+            "PRESENT flow #{} swapchain={}x{} effects={} output={}x{}+{}+{} guest={}x{}",
+            debug_flow_index, paint_context_.swapchain_extent.width,
+            paint_context_.swapchain_extent.height, guest_output_flow.effect_count,
+            guest_output_flow.effect_count
+                ? guest_output_flow.effect_output_sizes[guest_output_flow.effect_count - 1].first
+                : 0,
+            guest_output_flow.effect_count
+                ? guest_output_flow.effect_output_sizes[guest_output_flow.effect_count - 1].second
+                : 0,
+            guest_output_flow.output_x, guest_output_flow.output_y,
+            guest_output_properties.frontbuffer_width, guest_output_properties.frontbuffer_height);
+      }
+    }
     if (guest_output_flow.effect_count) {
       // Store the main target reference to the guest output image so it's not
       // destroyed while it's still potentially in use by main target painting
