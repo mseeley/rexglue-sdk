@@ -25,6 +25,11 @@
 #include <mach/vm_region.h>
 #endif  // REX_PLATFORM_MAC
 
+#if REX_PLATFORM_PS5
+#include <ps5platform/kernel.h>
+#include <ps5platform/shm.h>
+#endif  // REX_PLATFORM_PS5
+
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -112,7 +117,13 @@ void AndroidShutdown() {
 #endif
 
 size_t page_size() {
+#if REX_PLATFORM_PS5
+  // The console's kernel maps and protects 16 KiB pages, whatever
+  // getpagesize() says.
+  return PS5_KERNEL_PAGE_SIZE;
+#else
   return getpagesize();
+#endif
 }
 size_t allocation_granularity() {
   return page_size();
@@ -237,6 +248,34 @@ static PageAccess PermsToPageAccess(const char perms[5]) {
 }  // namespace
 #endif  // REX_PLATFORM_LINUX
 
+#if REX_PLATFORM_PS5
+namespace {
+
+// The kernel's own query: the console has no /proc.
+bool QueryKernelProtect(void* address, uintptr_t& end, PageAccess& access) {
+  void* start = nullptr;
+  void* region_end = nullptr;
+  uint32_t protection = 0;
+  if (sceKernelQueryMemoryProtection(address, &start, &region_end, &protection) != 0) {
+    return false;
+  }
+  end = reinterpret_cast<uintptr_t>(region_end);
+  const bool r = protection & PS5_KERNEL_PROT_CPU_READ;
+  const bool w = protection & PS5_KERNEL_PROT_CPU_WRITE;
+  const bool x = protection & PS5_KERNEL_PROT_CPU_EXEC;
+  if (!r && !w && !x) {
+    access = PageAccess::kNoAccess;
+  } else if (x) {
+    access = w ? PageAccess::kExecuteReadWrite : PageAccess::kExecuteReadOnly;
+  } else {
+    access = w ? PageAccess::kReadWrite : PageAccess::kReadOnly;
+  }
+  return true;
+}
+
+}  // namespace
+#endif  // REX_PLATFORM_PS5
+
 void* AllocFixed(void* base_address, size_t length, AllocationType allocation_type,
                  PageAccess access) {
   // Emulates Windows VirtualAlloc behavior:
@@ -270,6 +309,24 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
       return nullptr;
     }
     if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
+      return base_address;
+    }
+    return nullptr;
+  }
+#endif
+
+  // On the PS5 every fixed address is inside the guest arena, whose
+  // direct-memory views an anonymous mapping would replace (it has no
+  // MAP_FIXED_NOREPLACE either). Reserving or committing there only changes
+  // the protection.
+#if REX_PLATFORM_PS5
+  if (base_address != nullptr) {
+    const size_t host_page = page_size();
+    const uintptr_t address = reinterpret_cast<uintptr_t>(base_address);
+    if ((address % host_page) != 0 || (length % host_page) != 0) {
+      return nullptr;
+    }
+    if (mprotect(base_address, length, prot_initial) == 0) {
       return base_address;
     }
     return nullptr;
@@ -323,7 +380,9 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
       if (mprotect(base_address, length, PROT_NONE) != 0) {
         return false;
       }
-#if defined(MADV_DONTNEED)
+      // On the PS5 the guest arena is direct memory, which stays allocated
+      // until the whole object is released.
+#if defined(MADV_DONTNEED) && !REX_PLATFORM_PS5
       (void)madvise(base_address, length, MADV_DONTNEED);
 #endif
       return true;
@@ -349,6 +408,11 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
   if (out_old_access) {
     size_t old_region_length = 0;
     QueryProtect(base_address, old_region_length, *out_old_access);
+  }
+#elif REX_PLATFORM_PS5
+  if (out_old_access) {
+    uintptr_t end = 0;
+    QueryKernelProtect(base_address, end, *out_old_access);
   }
 #elif REX_PLATFORM_LINUX
   // NOTE(tomc): we may want to look at doing this differently. it should work for now
@@ -408,6 +472,15 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
     access_out = PageAccess::kNoAccess;
   }
   return true;
+#elif REX_PLATFORM_PS5
+  access_out = PageAccess::kNoAccess;
+  length = 0;
+  uintptr_t end = 0;
+  if (!QueryKernelProtect(base_address, end, access_out)) {
+    return false;
+  }
+  length = static_cast<size_t>(end - reinterpret_cast<uintptr_t>(base_address));
+  return true;
 #elif !REX_PLATFORM_LINUX
   access_out = PageAccess::kNoAccess;
   length = 0;
@@ -429,6 +502,65 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 #endif
 }
 
+#if REX_PLATFORM_PS5
+// Every view of a POSIX shared-memory object is charged to the console's
+// 448 MiB flexible budget. A direct-memory allocation can be mapped any number
+// of times and is charged only to the direct pool, so the handle is a
+// ps5_shm. Its memory is taken whole at creation.
+FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
+                                          PageAccess access, bool commit) {
+  auto* shm = new struct ps5_shm;
+  int result = ps5_shm_create(length, shm);
+  if (result != 0) {
+    REXSYS_ERROR("ps5_shm_create(0x{:X}) failed: 0x{:08X}", length, uint32_t(result));
+    delete shm;
+    return kFileMappingHandleInvalid;
+  }
+  return reinterpret_cast<FileMappingHandle>(shm);
+}
+
+void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
+  auto* shm = reinterpret_cast<struct ps5_shm*>(handle);
+  ps5_shm_destroy(shm);
+  delete shm;
+}
+
+void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
+                  size_t file_offset) {
+  int protection = 0;
+  switch (access) {
+    case PageAccess::kNoAccess:
+      break;
+    case PageAccess::kReadOnly:
+      protection = PS5_SHM_READ;
+      break;
+    case PageAccess::kReadWrite:
+      protection = PS5_SHM_READ | PS5_SHM_WRITE;
+      break;
+    case PageAccess::kExecuteReadOnly:
+      protection = PS5_SHM_READ | PS5_SHM_EXEC;
+      break;
+    case PageAccess::kExecuteReadWrite:
+      protection = PS5_SHM_READ | PS5_SHM_WRITE | PS5_SHM_EXEC;
+      break;
+  }
+  // A fixed view replaces what is there: the caller places it inside its own
+  // reservation, never over memory it doesn't own.
+  void* view = nullptr;
+  int result = ps5_shm_map(reinterpret_cast<const struct ps5_shm*>(handle), file_offset, length,
+                           base_address, protection, base_address ? PS5_SHM_FIXED : 0u, &view);
+  if (result != 0) {
+    REXSYS_ERROR("ps5_shm_map({}, 0x{:X}, offset 0x{:X}) failed: 0x{:08X}", base_address, length,
+                 file_offset, uint32_t(result));
+    return nullptr;
+  }
+  return view;
+}
+
+bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
+  return ps5_shm_unmap(base_address, length, 0) == 0;
+}
+#else
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
                                           PageAccess access, bool commit) {
 #if REX_PLATFORM_ANDROID
@@ -531,6 +663,7 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
   return munmap(base_address, length) == 0;
 }
+#endif  // REX_PLATFORM_PS5
 
 }  // namespace memory
 }  // namespace rex

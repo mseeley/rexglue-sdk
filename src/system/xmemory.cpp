@@ -13,6 +13,9 @@
 #include <cstring>
 #include <utility>
 
+#if REX_PLATFORM_PS5
+#include <ps5platform/shm.h>
+#endif
 #if REX_PLATFORM_MAC
 #include <sys/mman.h>
 #endif
@@ -123,6 +126,12 @@ Memory::~Memory() {
   if (mapping_ != rex::memory::kFileMappingHandleInvalid) {
     UnmapViews();
     rex::memory::CloseFileMappingHandle(mapping_, file_name_);
+#if REX_PLATFORM_PS5
+    if (ps5_reservation_) {
+      ps5_vrange_release(ps5_reservation_, ps5_reservation_size_);
+      ps5_reservation_ = nullptr;
+    }
+#endif
     mapping_base_ = nullptr;
     mapping_ = rex::memory::kFileMappingHandleInvalid;
   }
@@ -153,6 +162,13 @@ bool Memory::Initialize() {
   // into it with MAP_SHARED|MAP_FIXED so all views share the same backing fd.
   if (MapViewsMac()) {
     REXSYS_ERROR("Unable to find a continuous block in the 64bit address space.");
+    assert_always();
+    return false;
+  }
+  mapping_base_ = views_.all_views[0];
+#elif REX_PLATFORM_PS5
+  if (MapViewsPS5()) {
+    REXSYS_ERROR("Unable to place the guest memory arena.");
     assert_always();
     return false;
   }
@@ -357,6 +373,36 @@ int Memory::MapViewsMac() {
   return 0;
 }
 #endif  // REX_PLATFORM_MAC
+
+#if REX_PLATFORM_PS5
+int Memory::MapViewsPS5() {
+  // A mapping placed by address alone may land in the Vulkan driver's GPU
+  // window (0x2_0000_0000 - 0x2_FFFF_FFFF), and the views are fixed mappings,
+  // which replace whatever is there. Reserve the whole arena first where the
+  // kernel grants large ranges at the address asked for, then place each view
+  // inside it, as MapViewsMac does.
+  constexpr uintptr_t kArenaHint = 0x10'0000'0000ull;
+  const size_t total_size =
+      static_cast<size_t>(map_info[rex::countof(map_info) - 1].virtual_address_end -
+                          map_info[0].virtual_address_start + 1);
+  void* reserved_base = nullptr;
+  int result = ps5_vrange_reserve(total_size, reinterpret_cast<void*>(kArenaHint), 0,
+                                  &reserved_base);
+  if (result != 0) {
+    REXSYS_ERROR("MapViewsPS5: reserving 0x{:X} bytes failed: 0x{:08X}", total_size,
+                 uint32_t(result));
+    return 1;
+  }
+  ps5_reservation_ = reserved_base;
+  ps5_reservation_size_ = total_size;
+  if (MapViews(reinterpret_cast<uint8_t*>(reserved_base))) {
+    ps5_vrange_release(reserved_base, total_size);
+    ps5_reservation_ = nullptr;
+    return 1;
+  }
+  return 0;
+}
+#endif  // REX_PLATFORM_PS5
 
 int Memory::MapViews(uint8_t* mapping_base) {
   assert_true(rex::countof(map_info) == rex::countof(views_.all_views));

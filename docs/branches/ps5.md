@@ -60,6 +60,17 @@ applies there in general, and for the PS5 only where it doesn't:
 | FFmpeg | `thirdparty/ffmpeg-config-freebsd/config.h`, put ahead of FFmpeg's own `config.h` on FreeBSD targets. It is the Linux x86-64 config without memalign, sched_getaffinity, `<malloc.h>`, `<asm/types.h>`, perf events and iconv. The FFmpeg submodule is unchanged. |
 | Link libraries | `rexcore` links no `pthread`/`rt`/`dl` on the PS5. |
 
+**Running on the console.** These change behaviour on the PS5 only:
+
+| Area | Change |
+|---|---|
+| Guest memory | The arena is one direct-memory object from the PayloadSDK fork's platform layer (`ps5_shm`), not a POSIX shared-memory object, whose every view would be charged to the 448 MiB flexible budget. `Memory::MapViewsPS5` reserves the whole arena at `0x10_0000_0000` (`ps5_vrange_reserve`) and places the nine views inside it, as `MapViewsMac` does: probing `1 << n` from 4 GiB would place fixed views over the Vulkan driver's GPU window (`0x2_0000_0000`-`0x2_FFFF_FFFF`). The 4.5 GiB is taken when the arena is made. |
+| Host pages | `page_size()` is the kernel's 16 KiB. The guest heaps already handle host pages larger than 4 KiB (macOS on Apple Silicon), and the `0xE0000000` heap gets the same 4 KiB host offset there, in `PhysicalHostOffset` and in the generated code's `REX_PHYS_HOST_OFFSET` (the codegen templates; a host `rexglue` from this branch has to run codegen). |
+| Commit and decommit | A fixed-address `AllocFixed` only changes the protection: an anonymous mapping would replace the arena's direct-memory views, and there is no `MAP_FIXED_NOREPLACE`. Decommit skips `madvise`: direct memory stays allocated until the object is released. |
+| `QueryProtect`, `Protect`'s old access | `sceKernelQueryMemoryProtection`, since there is no `/proc/self/maps`. |
+| Thread priorities | Not set: libkernel numbers priorities in its own range and may refuse the guest's, which would fail thread creation. On Linux the attributes had no effect (no `PTHREAD_EXPLICIT_SCHED`). |
+| Presentation | A `KhrDisplaySurface` surface type (`surface_khr_display.h`) and `VK_KHR_display`, which RADV implements on VideoOut. The presenter takes the display's mode of the surface's size closest to 60 Hz (the first mode otherwise) and creates a display plane surface on it; the swapchain is sized to the mode, FIFO, B8G8R8A8. |
+
 ## Status
 
 - Builds the title on 2026-10-18: `librexruntime.a` and `librexgpu-xenos.a`
@@ -68,13 +79,9 @@ applies there in general, and for the PS5 only where it doesn't:
 - The Linux static build of lcgol also compiles and links from this branch
   (not replayed). Its code paths only change in `bit_scan_forward`
   (`__builtin_ffs`) and the RenderDoc guard.
-- Not run on a console yet.
-- Still to do before the title can boot (M1):
-  - The guest memory backend on the PS5: `ps5_shm` views in a reservation at
-    `0x10_0000_0000`. The current `shm_open` path is charged to the 448 MiB
-    flexible budget, and its base probe starts inside RADV's GPU window.
-  - `QueryProtect` without `/proc/self/maps`.
-  - The `VK_KHR_display` surface on VideoOut in the presenter.
-  - The console log sink on `stderr` (the kernel log).
+- 2026-10-18: the console runtime above (guest memory, `QueryProtect`,
+  thread priorities, the display surface) compiles, and lcgol-mods links a
+  title with it and a probe mode that tests these on the console. Not run on
+  a console yet.
 - The FreeBSD changes are general. The PS5 ones (`REX_PLATFORM_PS5`, SDL off)
   are specific to this port.
