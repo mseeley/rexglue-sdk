@@ -37,6 +37,7 @@ target_link_libraries(unit_tests PRIVATE
     rexruntime
     Catch2::Catch2WithMain
 )
+rexglue_link_runtime_whole_archive(unit_tests)
 
 # ReXApp is shipped as source for recomp projects, rather than compiled into
 # rexui. Keep its SDK-consumer compilation path covered by the test build.

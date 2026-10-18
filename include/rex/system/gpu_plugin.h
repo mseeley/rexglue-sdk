@@ -46,8 +46,14 @@ struct GpuCreateInfo {
 using GpuAbiVersionFn = uint32_t (*)();
 using GpuCreateFn = IGraphicsSystem* (*)(uint32_t abi_version, const GpuCreateInfo* info);
 
-// Loads rexgpu-<name> from the executable's directory and constructs its
-// graphics system. Returns nullptr after logging a detailed error (missing
+// Static builds (REXGLUE_STATIC_RUNTIME) link plugins into the executable
+// instead. Each registers its two entry points under its name from a static
+// initializer, and LoadGpuPlugin finds it there without loading a library.
+void RegisterStaticGpuPlugin(const char* name, GpuAbiVersionFn abi_version_fn,
+                             GpuCreateFn create_fn);
+
+// Loads rexgpu-<name> from the executable's directory (or takes it from the
+// static plugins) and constructs its graphics system. Returns nullptr after logging a detailed error (missing
 // file, missing exports, ABI mismatch, or factory failure). The library
 // handle is retained for process lifetime; plugins are never unloaded.
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name,

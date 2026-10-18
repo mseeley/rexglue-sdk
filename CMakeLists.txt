@@ -23,6 +23,18 @@ option(REXGLUE_ENABLE_SANITIZERS "Enable UndefinedBehaviorSanitizer" OFF)
 option(REXGLUE_ENABLE_FIDELITYFX "Enable optional AMD FidelityFX integration (experimental)" OFF)
 option(REXGLUE_ENABLE_TRACY                "Enable Tracy profiler integration" ON)
 option(REXGLUE_ENABLE_PERF_COUNTERS        "Enable lightweight perf counter registry and overlay" ON)
+# Static linking, for targets that cannot load shared libraries (the PS5 refuses
+# dlopen) or that want one self-contained executable.
+option(REXGLUE_STATIC_RUNTIME
+    "Link rexruntime and the GPU plugins into the executable instead of loading shared libraries" OFF)
+option(REXGLUE_VULKAN_LINKED_LOADER
+    "Call a vkGetInstanceProcAddr linked into the executable instead of dlopening the Vulkan loader" OFF)
+set(REXGLUE_VULKAN_LOADER_LIBRARY "" CACHE STRING
+    "Library that provides vkGetInstanceProcAddr when REXGLUE_VULKAN_LINKED_LOADER is ON (default: the system Vulkan loader)")
+if(REXGLUE_STATIC_RUNTIME AND REXGLUE_ENABLE_TRACY)
+    message(FATAL_ERROR
+        "REXGLUE_STATIC_RUNTIME needs REXGLUE_ENABLE_TRACY=OFF: the Tracy client is a shared library.")
+endif()
 # Propagate profiling defines globally (compiled out in Release)
 if(REXGLUE_ENABLE_TRACY)
     add_compile_definitions($<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
@@ -290,6 +302,8 @@ message(STATUS "  C++ Standard: C++${CMAKE_CXX_STANDARD}")
 message(STATUS "  Graphics: D3D12=${REXGLUE_USE_D3D12} Vulkan=${REXGLUE_USE_VULKAN}")
 message(STATUS "  FidelityFX: ${REXGLUE_ENABLE_FIDELITYFX}")
 message(STATUS "  Tracy: ${REXGLUE_ENABLE_TRACY}")
+message(STATUS "  Static runtime: ${REXGLUE_STATIC_RUNTIME}")
+message(STATUS "  Linked Vulkan loader: ${REXGLUE_VULKAN_LINKED_LOADER}")
 message(STATUS "  Perf Counters: ${REXGLUE_ENABLE_PERF_COUNTERS}")
 message(STATUS "===========================================")
 

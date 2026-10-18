@@ -48,7 +48,15 @@ set(REXSYSTEM_SOURCES
     xex_module.cpp
 )
 
-add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
+if(REXGLUE_STATIC_RUNTIME)
+    # Consumers link it whole (rexglue_link_runtime_whole_archive): kernel
+    # exports and cvars register from static initializers that nothing else
+    # references.
+    add_library(rexruntime STATIC ${REXSYSTEM_SOURCES})
+    target_compile_definitions(rexruntime PUBLIC REX_STATIC_RUNTIME=1)
+else()
+    add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
+endif()
 add_library(rex::runtime ALIAS rexruntime)
 add_library(rex::system ALIAS rexruntime)
 add_library(rex::kernel ALIAS rexruntime)
@@ -122,4 +130,14 @@ if(REXGLUE_USE_VULKAN)
         spirv-tools-headers
     )
     target_compile_definitions(rexruntime PUBLIC REX_HAS_VULKAN=1)
+    if(REXGLUE_VULKAN_LINKED_LOADER)
+        # vulkan_instance.cpp (rexui) calls vkGetInstanceProcAddr directly;
+        # whatever provides it is linked here.
+        set(_rexglue_vulkan_loader "${REXGLUE_VULKAN_LOADER_LIBRARY}")
+        if(NOT _rexglue_vulkan_loader)
+            find_library(REXGLUE_SYSTEM_VULKAN_LOADER NAMES vulkan vulkan-1 REQUIRED)
+            set(_rexglue_vulkan_loader "${REXGLUE_SYSTEM_VULKAN_LOADER}")
+        endif()
+        target_link_libraries(rexruntime PUBLIC ${_rexglue_vulkan_loader})
+    endif()
 endif()
