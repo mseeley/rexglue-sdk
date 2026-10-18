@@ -669,6 +669,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
       pthread_attr_destroy(&attr);
       return false;
     }
+    // Linux threads inherit their creator's scheduling unless
+    // PTHREAD_EXPLICIT_SCHED is set, so these attributes change nothing there.
+    // The PS5's libkernel numbers priorities in its own range (the PS4 SDK's
+    // 256-767) and may refuse these, which would fail the thread's creation.
+#if !REX_PLATFORM_PS5
     if (params.initial_priority != 0) {
       sched_param sched{};
       sched.sched_priority = params.initial_priority + 1;
@@ -681,6 +686,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
         return false;
       }
     }
+#endif  // !REX_PLATFORM_PS5
     if (pthread_create(&thread_, &attr, ThreadStartRoutine, start_data) != 0) {
       pthread_attr_destroy(&attr);
       return false;
@@ -857,6 +863,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   void set_priority(int new_priority) {
     WaitStarted();
+#if REX_PLATFORM_PS5
+    // Guest priorities aren't in libkernel's range (see Initialize).
+    (void)new_priority;
+    return;
+#endif
     sched_param param{};
     param.sched_priority = new_priority;
     int result = pthread_setschedparam(thread_, SCHED_FIFO, &param);

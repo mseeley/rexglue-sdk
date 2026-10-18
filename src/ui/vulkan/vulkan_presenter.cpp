@@ -45,6 +45,9 @@
 #if REX_PLATFORM_MAC
 #include <rex/ui/surface_mac.h>
 #endif
+#if REX_PLATFORM_PS5
+#include <rex/ui/surface_khr_display.h>
+#endif
 
 REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
                     "Clear render pass during presentation");
@@ -446,8 +449,79 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
     type_flags |= Surface::kTypeFlag_CAMetalLayer;
   }
 #endif
+#if REX_PLATFORM_PS5
+  if (instance_extensions.ext_KHR_display) {
+    type_flags |= Surface::kTypeFlag_KhrDisplay;
+  }
+#endif
   return type_flags;
 }
+
+#if REX_PLATFORM_PS5
+VkResult VulkanPresenter::CreateKhrDisplaySurface(uint32_t width, uint32_t height,
+                                                  VkSurfaceKHR& surface_out) {
+  const VulkanInstance* const vulkan_instance = vulkan_device_->vulkan_instance();
+  const VulkanInstance::Functions& ifn = vulkan_instance->functions();
+  const VkPhysicalDevice physical_device = vulkan_device_->physical_device();
+
+  VkDisplayPropertiesKHR display_properties;
+  uint32_t display_count = 1;
+  VkResult result = ifn.vkGetPhysicalDeviceDisplayPropertiesKHR(physical_device, &display_count,
+                                                                &display_properties);
+  if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !display_count) {
+    REXLOG_ERROR("VulkanPresenter: No display to present to");
+    return result != VK_SUCCESS ? result : VK_ERROR_INITIALIZATION_FAILED;
+  }
+
+  uint32_t mode_count = 0;
+  ifn.vkGetDisplayModePropertiesKHR(physical_device, display_properties.display, &mode_count,
+                                    nullptr);
+  std::vector<VkDisplayModePropertiesKHR> modes(mode_count);
+  result = ifn.vkGetDisplayModePropertiesKHR(physical_device, display_properties.display,
+                                             &mode_count, modes.data());
+  modes.resize(mode_count);
+  if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || modes.empty()) {
+    REXLOG_ERROR("VulkanPresenter: The display offers no modes");
+    return result != VK_SUCCESS ? result : VK_ERROR_INITIALIZATION_FAILED;
+  }
+
+  // The mode of the surface's size whose refresh rate is closest to 60 Hz:
+  // the guest presents at 60 Hz or below. Without one of that size, the
+  // display's first mode.
+  const VkDisplayModePropertiesKHR* chosen = nullptr;
+  auto distance_from_60hz = [](const VkDisplayModePropertiesKHR& mode) {
+    return std::abs(int64_t(mode.parameters.refreshRate) - 60000);
+  };
+  for (const VkDisplayModePropertiesKHR& mode : modes) {
+    if (mode.parameters.visibleRegion.width != width ||
+        mode.parameters.visibleRegion.height != height) {
+      continue;
+    }
+    if (!chosen || distance_from_60hz(mode) < distance_from_60hz(*chosen)) {
+      chosen = &mode;
+    }
+  }
+  if (!chosen) {
+    chosen = &modes.front();
+  }
+  REXLOG_INFO("VulkanPresenter: Presenting to {} at {}x{}, {:.3f} Hz",
+              display_properties.displayName ? display_properties.displayName : "the display",
+              chosen->parameters.visibleRegion.width, chosen->parameters.visibleRegion.height,
+              chosen->parameters.refreshRate / 1000.0);
+
+  VkDisplaySurfaceCreateInfoKHR surface_create_info = {};
+  surface_create_info.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
+  surface_create_info.displayMode = chosen->displayMode;
+  surface_create_info.planeIndex = 0;
+  surface_create_info.planeStackIndex = 0;
+  surface_create_info.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+  surface_create_info.globalAlpha = 1.0f;
+  surface_create_info.alphaMode = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
+  surface_create_info.imageExtent = chosen->parameters.visibleRegion;
+  return ifn.vkCreateDisplayPlaneSurfaceKHR(vulkan_instance->instance(), &surface_create_info,
+                                            nullptr, &surface_out);
+}
+#endif  // REX_PLATFORM_PS5
 
 Surface::TypeFlags VulkanPresenter::GetSupportedSurfaceTypes() const {
   if (!vulkan_device_->extensions().ext_KHR_swapchain) {
@@ -856,6 +930,12 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
         surface_create_info.pLayer = metal_surface.layer();
         vulkan_surface_create_result = ifn.vkCreateMetalSurfaceEXT(
             instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
+      } break;
+#endif
+#if REX_PLATFORM_PS5
+      case Surface::kTypeIndex_KhrDisplay: {
+        vulkan_surface_create_result = CreateKhrDisplaySurface(
+            new_surface_width, new_surface_height, paint_context_.vulkan_surface);
       } break;
 #endif
       default:
