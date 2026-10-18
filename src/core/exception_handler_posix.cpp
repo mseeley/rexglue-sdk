@@ -31,6 +31,17 @@
 
 #include <ucontext.h>
 
+#if REX_PLATFORM_MAC
+#include <execinfo.h>
+#include <fcntl.h>
+#include <mach/mach.h>
+#include <pthread.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cstdio>
+#endif
+
 namespace rex::arch {
 
 bool signal_handlers_installed_ = false;
@@ -419,8 +430,71 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
   }
 }
 
+#if REX_PLATFORM_MAC
+namespace {
+// Debugging aid: `kill -USR1 <pid>` makes every thread append its native
+// backtrace to run/thread_dump.txt. Recompiled functions keep their sub_XXXXXXXX
+// symbols, so this shows where guest threads are stuck when a debugger cannot
+// attach to the process.
+int thread_dump_fd = -1;
+std::atomic<int> thread_dump_lock{0};
+
+void ThreadDumpThisThread(int) {
+  void* frames[48];
+  int count = backtrace(frames, 48);
+  while (thread_dump_lock.exchange(1, std::memory_order_acquire)) {
+  }
+  uint64_t thread_id = 0;
+  pthread_threadid_np(nullptr, &thread_id);
+  char header[64];
+  int length = std::snprintf(header, sizeof(header), "\n--- thread %llu\n",
+                             static_cast<unsigned long long>(thread_id));
+  if (length > 0) {
+    write(thread_dump_fd, header, size_t(length));
+  }
+  backtrace_symbols_fd(frames, count, thread_dump_fd);
+  thread_dump_lock.store(0, std::memory_order_release);
+}
+
+void ThreadDumpRequest(int) {
+  if (thread_dump_fd < 0) {
+    thread_dump_fd = open("run/thread_dump.txt", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (thread_dump_fd < 0) {
+      return;
+    }
+  }
+  write(thread_dump_fd, "\n=== thread dump\n", 18);
+  thread_act_array_t threads;
+  mach_msg_type_number_t thread_count;
+  if (task_threads(mach_task_self(), &threads, &thread_count) != KERN_SUCCESS) {
+    return;
+  }
+  for (mach_msg_type_number_t i = 0; i < thread_count; ++i) {
+    if (pthread_t thread = pthread_from_mach_thread_np(threads[i])) {
+      pthread_kill(thread, SIGUSR2);
+    }
+    mach_port_deallocate(mach_task_self(), threads[i]);
+  }
+  vm_deallocate(mach_task_self(), vm_address_t(threads), thread_count * sizeof(thread_act_t));
+}
+
+void InstallThreadDumpHandlers() {
+  struct sigaction action;
+  std::memset(&action, 0, sizeof(action));
+  action.sa_flags = SA_RESTART;
+  action.sa_handler = ThreadDumpThisThread;
+  sigaction(SIGUSR2, &action, nullptr);
+  action.sa_handler = ThreadDumpRequest;
+  sigaction(SIGUSR1, &action, nullptr);
+}
+}  // namespace
+#endif  // REX_PLATFORM_MAC
+
 void ExceptionHandler::Install(Handler fn, void* data) {
   if (!signal_handlers_installed_) {
+#if REX_PLATFORM_MAC
+    InstallThreadDumpHandlers();
+#endif
     struct sigaction signal_handler;
 
     std::memset(&signal_handler, 0, sizeof(signal_handler));
