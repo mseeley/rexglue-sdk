@@ -62,8 +62,8 @@ Checked on 2026-10-18 with Lara Croft and the Guardian of Light on Linux
 - The recorded key replay reaches Temple of Light and renders it correctly
   on FSI.
 
-With both options off, the code paths are as before; the shared build has
-not been rebuilt on this branch yet.
+With both options off (the shared layout), the build from this branch is
+the same size as before, and the replay also reaches Temple of Light.
 
 General build options, suitable for upstream.
 
