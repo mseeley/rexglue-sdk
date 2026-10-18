@@ -145,10 +145,13 @@ endfunction()
 
 if(NOT WIN32)
     # Use appropriate code model based on architecture
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64" AND NOT APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64" AND NOT APPLE AND NOT PS5)
         # Large code model on Linux x86_64 for linking with very large recompiled executables (35MB+).
         # macOS uses small: the ld64 linker on macOS 15+ rejects text relocations produced
         # by -mcmodel=large, and macOS maps binaries in the low address space so ±2GB is sufficient.
+        # The PS5 uses small too: a title's linker script places only the standard sections, so
+        # the large model's .ltext/.ldata/.lrodata/.lbss land in the wrong segments, and the
+        # console refuses the executable. Its whole image is far below 2GB.
         add_compile_options(-mcmodel=large)
     else()
         add_compile_options(-mcmodel=small)
