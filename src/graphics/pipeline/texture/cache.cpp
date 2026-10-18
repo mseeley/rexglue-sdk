@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <set>
+#include <tuple>
 #include <utility>
 
 #include <rex/assert.h>
@@ -25,6 +27,11 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+
+REXCVAR_DEFINE_BOOL(gpu_log_texture_formats, false, "GPU",
+                    "Log each distinct texture format, sign, swizzle and layout combination "
+                    "bound (debugging)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
                      "Texture cache memory limit for render-to-texture (MB)")
@@ -495,6 +502,26 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     uint8_t old_swizzled_signs = binding.swizzled_signs;
     BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
     texture_bindings_in_sync_ |= index_bit;
+    if (REXCVAR_GET(gpu_log_texture_formats) && binding.key.is_valid) {
+      // Each distinct format/layout combination once.
+      static std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> seen;
+      const TextureKey& key = binding.key;
+      auto combination = std::make_tuple(
+          uint32_t(key.format), uint32_t(key.dimension), uint32_t(key.endianness),
+          uint32_t(binding.swizzled_signs), uint32_t(fetch.swizzle),
+          uint32_t(key.tiled) | (uint32_t(key.packed_mips) << 1) |
+              ((uint32_t(fetch.exp_adjust) & 0x3F) << 2) | (uint32_t(fetch.num_format) << 8));
+      if (seen.insert(combination).second) {
+        REXGPU_INFO(
+            "TEXFMT {} dim={} endian={} signs={:02X} swizzle={:03o} tiled={} packed_mips={} "
+            "exp_adjust={} num_format={} size={}x{} base={:08X} fetch={}",
+            FormatInfo::Get(key.format)->name, uint32_t(key.dimension),
+            uint32_t(key.endianness), binding.swizzled_signs, uint32_t(fetch.swizzle),
+            uint32_t(key.tiled), uint32_t(key.packed_mips), int32_t(fetch.exp_adjust),
+            uint32_t(fetch.num_format), key.GetWidth(), key.GetHeight(), key.base_page << 12,
+            index);
+      }
+    }
     if (!binding.key.is_valid) {
       if (old_key.is_valid) {
         bindings_changed |= index_bit;
