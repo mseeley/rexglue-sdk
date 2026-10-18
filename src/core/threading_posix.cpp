@@ -414,9 +414,10 @@ class PosixConditionBase {
       if (timeout == std::chrono::milliseconds::max()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       } else {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-        std::this_thread::sleep_for(sleep_time);
+        // Keep the remainder at full precision: truncated to milliseconds, a
+        // sub-millisecond remainder became sleep_for(0) and the loop spun.
+        std::this_thread::sleep_for(
+            std::min<std::chrono::steady_clock::duration>(end_time - now, std::chrono::milliseconds(1)));
       }
     }
   }
@@ -1106,7 +1107,9 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
   if (deadline == std::chrono::steady_clock::time_point::max()) {
     return kAlertablePollSlice;
   }
-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+  // Round up: a sub-millisecond remainder truncated to a zero timeout makes
+  // the caller's loop spin until the deadline.
+  auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
       deadline - std::chrono::steady_clock::now());
   if (remaining <= std::chrono::milliseconds::zero()) {
     return std::chrono::milliseconds::zero();
