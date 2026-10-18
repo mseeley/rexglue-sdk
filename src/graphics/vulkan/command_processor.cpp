@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iterator>
 #include <mutex>
 #include <string>
@@ -43,6 +44,7 @@
 #include <rex/types.h>
 #include <rex/memory/utils.h>
 #include <rex/ui/flags.h>
+#include <rex/ui/renderdoc_api.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
 
@@ -62,6 +64,11 @@ REXCVAR_DEFINE_BOOL(vulkan_invalidate_textures_every_frame, false, "GPU/Vulkan",
 
 REXCVAR_DEFINE_BOOL(vulkan_log_resolves, false, "GPU/Vulkan",
                     "Log every resolve destination and the swap source address (debugging)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(renderdoc_capture_trigger_file, "", "GPU/Vulkan",
+                      "When this file exists, capture the next guest frame (swap to swap) in "
+                      "RenderDoc and delete the file. Needs the RenderDoc layer loaded")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
@@ -2283,6 +2290,35 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
 }
 
+void VulkanCommandProcessor::CaptureFrameIfTriggered() {
+  const std::string& trigger = REXCVAR_GET(renderdoc_capture_trigger_file);
+  if (trigger.empty())
+    return;
+  // The instance looks for RenderDoc before creating itself, which is before
+  // the Vulkan loader brings in the RenderDoc layer, so look again here.
+  static std::unique_ptr<ui::RenderDocAPI> renderdoc_late = ui::RenderDocAPI::CreateIfConnected();
+  ui::RenderDocAPI* renderdoc = GetVulkanDevice()->vulkan_instance()->renderdoc_api();
+  if (!renderdoc)
+    renderdoc = renderdoc_late.get();
+  if (!renderdoc)
+    return;
+  const RENDERDOC_API_1_0_0* api = renderdoc->api_1_0_0();
+  // Frame commands are submitted by the time of the next swap, so a capture
+  // from one swap to the next holds one whole guest frame.
+  if (renderdoc_capturing_) {
+    api->EndFrameCapture(nullptr, nullptr);
+    renderdoc_capturing_ = false;
+    REXGPU_INFO("RenderDoc: captured guest frame {}", frame_current_);
+    return;
+  }
+  std::error_code ec;
+  if (!std::filesystem::remove(trigger, ec))
+    return;
+  api->StartFrameCapture(nullptr, nullptr);
+  renderdoc_capturing_ = true;
+  REXGPU_INFO("RenderDoc: capturing guest frame {}", frame_current_);
+}
+
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
@@ -2291,6 +2327,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 
   if (!graphics_system_)
     return;
+  CaptureFrameIfTriggered();
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
     REXGPU_ERROR("XELOG_GPU PRESENT: NO PRESENTER");
