@@ -4416,9 +4416,31 @@ void VulkanCommandProcessor::LogResolveForDebugging(bool resolved, uint32_t writ
     return;
   }
   auto copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
-  REXGPU_INFO("RESOLVE frame={} ok={} dest={:08X} length={:X} format={}", frame_current_,
-              resolved, written_address, written_length,
-              uint32_t(copy_dest_info.copy_dest_format));
+  auto copy_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+  auto copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
+  auto surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
+  // Source: color format of the selected render target, or "depth" with its
+  // format (0 = D24S8, 1 = D24FS8).
+  uint32_t src_select = copy_control.copy_src_select;
+  std::string source;
+  if (src_select < 4) {
+    auto color_info = register_file_->Get<reg::RB_COLOR_INFO>(
+        reg::RB_COLOR_INFO::rt_register_indices[src_select]);
+    source = fmt::format("color{} fmt={} base={}", src_select,
+                         uint32_t(color_info.color_format), uint32_t(color_info.color_base));
+  } else {
+    auto depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
+    source = fmt::format("depth fmt={} base={}", uint32_t(depth_info.depth_format),
+                         uint32_t(depth_info.depth_base));
+  }
+  REXGPU_INFO(
+      "RESOLVE frame={} ok={} dest={:08X} length={:X} format={} number={} {}x{} src=[{}] "
+      "msaa={} sample={} pitch={}",
+      frame_current_, resolved, written_address, written_length,
+      uint32_t(copy_dest_info.copy_dest_format), uint32_t(copy_dest_info.copy_dest_number),
+      uint32_t(copy_dest_pitch.copy_dest_pitch), uint32_t(copy_dest_pitch.copy_dest_height),
+      source, uint32_t(surface_info.msaa_samples), uint32_t(copy_control.copy_sample_select),
+      uint32_t(surface_info.surface_pitch));
   if (resolved && written_length) {
     debug_frame_resolves.emplace_back(written_address, written_length);
   }
