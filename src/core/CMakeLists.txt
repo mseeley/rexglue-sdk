@@ -24,9 +24,9 @@ add_library(rexcore OBJECT
 )
 add_library(rex::core ALIAS rexcore)
 
-if(APPLE)
-    # Apple's libc++ still gates std::jthread/std::stop_token behind the
-    # experimental-library feature flag. Only timer_queue.cpp uses them, and
+if(APPLE OR PS5)
+    # Apple's libc++ and the PS5 payload SDK's libc++ 18 gate
+    # std::jthread/std::stop_token behind the experimental-library feature flag. Only timer_queue.cpp uses them, and
     # neither type crosses a header boundary.
     set_source_files_properties(timer_queue.cpp PROPERTIES
         COMPILE_OPTIONS "-fexperimental-library")
@@ -100,6 +100,8 @@ target_include_directories(rexcore PRIVATE
 
 if(APPLE)
     target_link_libraries(rexcore PRIVATE pthread)
+elseif(PS5)
+    # pthreads come from the system modules (libkernel), and there is no librt.
 elseif(UNIX)
     target_link_libraries(rexcore PRIVATE pthread rt dl)
 endif()

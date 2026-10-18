@@ -31,6 +31,23 @@ option(REXGLUE_VULKAN_LINKED_LOADER
     "Call a vkGetInstanceProcAddr linked into the executable instead of dlopening the Vulkan loader" OFF)
 set(REXGLUE_VULKAN_LOADER_LIBRARY "" CACHE STRING
     "Library that provides vkGetInstanceProcAddr when REXGLUE_VULKAN_LINKED_LOADER is ON (default: the system Vulkan loader)")
+# The PS5 (the payload SDK's toolchain sets PS5) has no SDL3 port: the game
+# brings its own main, window, input and audio there.
+if(PS5)
+    set(_rexglue_use_sdl_default OFF)
+else()
+    set(_rexglue_use_sdl_default ON)
+endif()
+option(REXGLUE_USE_SDL
+    "Use SDL3 for the entry point, windowing, input and audio" ${_rexglue_use_sdl_default})
+if(REXGLUE_USE_SDL)
+    add_compile_definitions(REX_HAS_SDL=1)
+endif()
+if(PS5 AND NOT (REXGLUE_STATIC_RUNTIME AND REXGLUE_VULKAN_LINKED_LOADER))
+    message(FATAL_ERROR
+        "The PS5 cannot load shared libraries: set REXGLUE_STATIC_RUNTIME=ON and "
+        "REXGLUE_VULKAN_LINKED_LOADER=ON.")
+endif()
 if(REXGLUE_STATIC_RUNTIME AND REXGLUE_ENABLE_TRACY)
     message(FATAL_ERROR
         "REXGLUE_STATIC_RUNTIME needs REXGLUE_ENABLE_TRACY=OFF: the Tracy client is a shared library.")
@@ -170,6 +187,11 @@ if(WIN32)
         message(FATAL_ERROR "Unsupported Windows architecture: ${REX_TARGET_PROCESSOR}")
     endif()
     add_compile_definitions(REX_PLATFORM_WINDOWS=1)
+elseif(PS5)
+    # FreeBSD-derived and POSIX: the Linux code paths apply, with PS5
+    # exceptions under REX_PLATFORM_PS5 (as Android does with its own flag).
+    set(REX_PLATFORM "ps5-amd64")
+    add_compile_definitions(REX_PLATFORM_LINUX=1 REX_PLATFORM_PS5=1)
 elseif(UNIX AND NOT APPLE)
     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
         set(REX_PLATFORM "linux-amd64")
@@ -279,8 +301,21 @@ add_subdirectory(src/audio)
 add_subdirectory(src/graphics)
 add_subdirectory(src/system)
 add_subdirectory(src/kernel)
-add_subdirectory(src/codegen)
-add_subdirectory(src/rexglue)
+if(CMAKE_CROSSCOMPILING)
+    # The rexglue tool runs codegen on the build machine. A cross build (the
+    # PS5) takes a host build of it instead of building one for the target.
+    set(REXGLUE_HOST_TOOL "" CACHE FILEPATH
+        "Host build of the rexglue tool, which runs codegen when cross-compiling")
+    if(NOT REXGLUE_HOST_TOOL)
+        message(FATAL_ERROR
+            "Cross-compiling needs REXGLUE_HOST_TOOL: a host build of the rexglue tool.")
+    endif()
+    add_executable(rex::rexglue IMPORTED GLOBAL)
+    set_target_properties(rex::rexglue PROPERTIES IMPORTED_LOCATION "${REXGLUE_HOST_TOOL}")
+else()
+    add_subdirectory(src/codegen)
+    add_subdirectory(src/rexglue)
+endif()
 
 # Add tests subdirectory if tests are enabled
 if(REXGLUE_BUILD_TESTS)
@@ -302,6 +337,7 @@ message(STATUS "  C++ Standard: C++${CMAKE_CXX_STANDARD}")
 message(STATUS "  Graphics: D3D12=${REXGLUE_USE_D3D12} Vulkan=${REXGLUE_USE_VULKAN}")
 message(STATUS "  FidelityFX: ${REXGLUE_ENABLE_FIDELITYFX}")
 message(STATUS "  Tracy: ${REXGLUE_ENABLE_TRACY}")
+message(STATUS "  SDL3: ${REXGLUE_USE_SDL}")
 message(STATUS "  Static runtime: ${REXGLUE_STATIC_RUNTIME}")
 message(STATUS "  Linked Vulkan loader: ${REXGLUE_VULKAN_LINKED_LOADER}")
 message(STATUS "  Perf Counters: ${REXGLUE_ENABLE_PERF_COUNTERS}")

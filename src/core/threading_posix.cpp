@@ -42,6 +42,11 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 #include <sched.h>
 
+#if defined(__FreeBSD__)
+#include <pthread_np.h>
+#include <sys/cpuset.h>
+#endif
+
 #if REX_PLATFORM_ANDROID
 #include <dlfcn.h>
 
@@ -63,6 +68,12 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #endif
 
 namespace rex::thread {
+
+#if defined(__FreeBSD__)
+using rex_cpu_set_t = cpuset_t;
+#elif !defined(__APPLE__)
+using rex_cpu_set_t = cpu_set_t;
+#endif
 
 #if REX_PLATFORM_ANDROID
 // May be null if no dynamically loaded functions are required.
@@ -178,6 +189,8 @@ void EnableAffinityConfiguration() {}
 uint32_t current_thread_system_id() {
 #if defined(__APPLE__)
   return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
+#elif defined(__FreeBSD__)
+  return static_cast<uint32_t>(pthread_getthreadid_np());
 #else
   return static_cast<uint32_t>(syscall(SYS_gettid));
 #endif
@@ -270,7 +283,8 @@ static sem_t* RexCreateAnonymousSemaphore() {
 class PosixConditionBase {
  public:
   PosixConditionBase() {
-#if REX_PLATFORM_LINUX
+// The PS5's libc has no robust mutexes; waits there behave as on macOS.
+#if REX_PLATFORM_LINUX && !REX_PLATFORM_PS5
     // Use robust mutexes so waits can recover if owner thread terminates.
     pthread_mutexattr_t attr;
     if (pthread_mutexattr_init(&attr) == 0) {
@@ -290,7 +304,7 @@ class PosixConditionBase {
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
     auto predicate = [this] { return this->signaled(); };
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !REX_PLATFORM_PS5  // robust mutex owner recovery
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
     int lock_result = pthread_mutex_lock(native_mutex);
     if (lock_result == EOWNERDEAD) {
@@ -344,7 +358,7 @@ class PosixConditionBase {
       locks.reserve(handles.size());
 
       for (size_t i = 0; i < handles.size(); ++i) {
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !REX_PLATFORM_PS5  // robust mutex owner recovery
         auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
         int result = pthread_mutex_trylock(native_mutex);
         if (result == 0 || result == EOWNERDEAD) {
@@ -719,6 +733,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
         std::lock_guard<std::mutex> lock(android_pre_api_26_name_mutex_);
         rex::string::copy_truncating(result.data(), android_pre_api_26_name_, result.size());
       }
+#elif defined(__FreeBSD__)
+      pthread_get_name_np(thread_, result.data(), result.size() - 1);
 #else
       if (pthread_getname_np(thread_, result.data(), result.size() - 1) != 0) {
         assert_always();
@@ -737,6 +753,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
       if (pthread_equal(thread_, pthread_self())) {
         pthread_setname_np(std::string(name).c_str());
       }
+#elif defined(__FreeBSD__)
+      pthread_set_name_np(thread_, std::string(name).c_str());
 #else
       pthread_setname_np(thread_, std::string(name).c_str());
 #endif
@@ -759,6 +777,12 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
 #if defined(__APPLE__)
   uint32_t system_id() const { return static_cast<uint32_t>(pthread_mach_thread_np(thread_)); }
+#elif defined(__FreeBSD__)
+  // pthread_t is a pointer here, and the kernel thread ID is only available to
+  // the thread itself (pthread_getthreadid_np).
+  uint32_t system_id() const {
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(thread_));
+  }
 #else
   uint32_t system_id() const { return static_cast<uint32_t>(thread_); }
 #endif
@@ -774,13 +798,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
     }
     return (uint64_t(1) << cpu_count) - 1;
 #else
-    cpu_set_t cpu_set;
+    rex_cpu_set_t cpu_set;
 #if REX_PLATFORM_ANDROID
-    if (sched_getaffinity(pthread_gettid_np(thread_), sizeof(cpu_set_t), &cpu_set) != 0) {
+    if (sched_getaffinity(pthread_gettid_np(thread_), sizeof(cpu_set), &cpu_set) != 0) {
       assert_always();
     }
 #else
-    if (pthread_getaffinity_np(thread_, sizeof(cpu_set_t), &cpu_set) != 0) {
+    if (pthread_getaffinity_np(thread_, sizeof(cpu_set), &cpu_set) != 0) {
       assert_always();
     }
 #endif
@@ -801,7 +825,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
     // no-op so higher layers can build and run.
     (void)mask;
 #else
-    cpu_set_t cpu_set;
+    rex_cpu_set_t cpu_set;
     CPU_ZERO(&cpu_set);
     for (auto i = 0u; i < 64; i++) {
       if (mask & (1ULL << i)) {
@@ -809,11 +833,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
       }
     }
 #if REX_PLATFORM_ANDROID
-    if (sched_setaffinity(pthread_gettid_np(thread_), sizeof(cpu_set_t), &cpu_set) != 0) {
+    if (sched_setaffinity(pthread_gettid_np(thread_), sizeof(cpu_set), &cpu_set) != 0) {
       assert_always();
     }
 #else
-    if (pthread_setaffinity_np(thread_, sizeof(cpu_set_t), &cpu_set) != 0) {
+    if (pthread_setaffinity_np(thread_, sizeof(cpu_set), &cpu_set) != 0) {
       assert_always();
     }
 #endif
@@ -869,9 +893,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
       return;
     }
 
-#if defined(__APPLE__)
-    // macOS has no sigqueue/pthread_sigqueue; pthread_kill delivers the signal
-    // without the sigval payload.
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    // macOS and FreeBSD have no pthread_sigqueue; pthread_kill delivers the
+    // signal without the sigval payload.
     int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
 #else
     sigval value{};
@@ -1514,6 +1538,8 @@ void Thread::Exit(int exit_code) {
 void set_current_thread_name(const std::string_view name) {
 #if defined(__APPLE__)
   pthread_setname_np(std::string(name).c_str());
+#elif defined(__FreeBSD__)
+  pthread_set_name_np(pthread_self(), std::string(name).c_str());
 #else
   pthread_setname_np(pthread_self(), std::string(name).c_str());
 #endif

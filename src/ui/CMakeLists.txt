@@ -12,13 +12,18 @@ set(REXUI_CORE_SOURCES
     menu_item.cpp
     presenter.cpp
     renderdoc_api.cpp
-    sdl_virtual_key.cpp
     window.cpp
-    window_sdl.cpp
     windowed_app.cpp
     windowed_app_context.cpp
-    windowed_app_context_sdl.cpp
 )
+# Without SDL the game provides main, Window::Create and its app context.
+if(REXGLUE_USE_SDL)
+    list(APPEND REXUI_CORE_SOURCES
+        sdl_virtual_key.cpp
+        window_sdl.cpp
+        windowed_app_context_sdl.cpp
+    )
+endif()
 
 # Optional overlay dialogs
 set(REXUI_OVERLAY_SOURCES
@@ -72,6 +77,8 @@ elseif(APPLE)
     set(REXUI_PLATFORM_SOURCES
         surface_mac.cpp
     )
+elseif(PS5)
+    set(REXUI_PLATFORM_SOURCES)
 else()
     set(REXUI_PLATFORM_SOURCES
         surface_gnulinux.cpp
@@ -112,7 +119,7 @@ target_link_libraries(rexui PUBLIC
     rexcore
     renderdoc
     imgui::imgui
-    SDL3::SDL3
+    $<$<BOOL:${REXGLUE_USE_SDL}>:SDL3::SDL3>
 )
 target_link_libraries(rexui PRIVATE utf8cpp)
 
@@ -149,7 +156,7 @@ if(REXGLUE_USE_VULKAN)
 endif()
 
 # Platform-specific dependencies
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT PS5)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
     # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every

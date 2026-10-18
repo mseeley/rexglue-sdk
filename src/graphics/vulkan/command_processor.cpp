@@ -2291,6 +2291,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
 }
 
 void VulkanCommandProcessor::CaptureFrameIfTriggered() {
+#if REX_HAS_RENDERDOC
   const std::string& trigger = REXCVAR_GET(renderdoc_capture_trigger_file);
   if (trigger.empty())
     return;
@@ -2317,6 +2318,7 @@ void VulkanCommandProcessor::CaptureFrameIfTriggered() {
   api->StartFrameCapture(nullptr, nullptr);
   renderdoc_capturing_ = true;
   REXGPU_INFO("RenderDoc: capturing guest frame {}", frame_current_);
+#endif
 }
 
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,

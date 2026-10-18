@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <time.h>
 
 #include <rex/assert.h>
@@ -42,6 +43,13 @@ inline uint64_t decode_fat_timestamp(const uint32_t date, const uint32_t time) {
 
 #if REX_PLATFORM_WIN32
   time_t timet = _mkgmtime(&tm);
+#elif REX_PLATFORM_PS5
+  // The PS5's libc has no timegm; <chrono>'s calendar converts in UTC too.
+  using namespace std::chrono;
+  const sys_days calendar_date =
+      year{tm.tm_year + 1900} / month(unsigned(tm.tm_mon + 1)) / day(unsigned(tm.tm_mday));
+  time_t timet =
+      system_clock::to_time_t(calendar_date + hours{tm.tm_hour} + minutes{tm.tm_min} + seconds{tm.tm_sec});
 #else
   time_t timet = timegm(&tm);
 #endif

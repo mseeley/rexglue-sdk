@@ -35,6 +35,11 @@
 #elif defined(__ANDROID__)
 #define REX_PLATFORM_ANDROID 1
 #define REX_PLATFORM_LINUX 1
+#elif defined(__PROSPERO__)
+// PS5: FreeBSD-derived and POSIX, so the Linux code paths apply, with PS5
+// exceptions under REX_PLATFORM_PS5.
+#define REX_PLATFORM_PS5 1
+#define REX_PLATFORM_LINUX 1
 #elif defined(__gnu_linux__)
 #define REX_PLATFORM_GNU_LINUX 1
 #define REX_PLATFORM_LINUX 1
@@ -55,6 +60,9 @@
 #endif
 #ifndef REX_PLATFORM_GNU_LINUX
 #define REX_PLATFORM_GNU_LINUX 0
+#endif
+#ifndef REX_PLATFORM_PS5
+#define REX_PLATFORM_PS5 0
 #endif
 #ifndef REX_PLATFORM_LINUX
 #define REX_PLATFORM_LINUX 0

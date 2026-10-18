@@ -37,7 +37,7 @@
 
 // macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
 // explicit *64 forms for legacy 32-bit off_t distributions.
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)  // 64-bit off_t, no *64 variants
 using rex_off64_t = off_t;
 #define rex_fseeko64 fseeko
 #define rex_ftello64 ftello
@@ -91,6 +91,9 @@ std::filesystem::path GetExecutablePath() {
   std::error_code ec;
   std::filesystem::path canonical_path = std::filesystem::weakly_canonical(executable_path, ec);
   return ec ? std::filesystem::path(executable_path) : canonical_path;
+#elif REX_PLATFORM_PS5
+  // No /proc; a title always runs from its mounted folder.
+  return "/app0/eboot.bin";
 #else
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);

@@ -244,6 +244,7 @@ target_compile_options(imgui PRIVATE -w)
 #=============================================================================
 # SDL3 - Cross-platform media layer
 #=============================================================================
+if(REXGLUE_USE_SDL)
 set(SDL_INSTALL ON CACHE BOOL "" FORCE)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -302,6 +303,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 add_subdirectory(sdl3)
+endif()
 
 #=============================================================================
 # DXC API headers (vendored from DirectXShaderCompiler, runtime-loaded)
@@ -560,6 +562,12 @@ target_include_directories(libavutil
     PRIVATE ${FFMPEG_ATOMICS_INCLUDE}
 )
 target_compile_definitions(libavutil PRIVATE ${FFMPEG_COMMON_DEFINES})
+# FFmpeg's config.h has no FreeBSD branch (the PS5 payload SDK); ours comes
+# first there.
+set(FFMPEG_FREEBSD_CONFIG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-config-freebsd")
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    target_include_directories(libavutil BEFORE PRIVATE "${FFMPEG_FREEBSD_CONFIG_DIR}")
+endif()
 target_compile_options(libavutil PRIVATE -w)  # Suppress warnings in third-party code
 if(WIN32)
     target_link_libraries(libavutil PRIVATE bcrypt)
@@ -689,6 +697,9 @@ target_include_directories(libavcodec
     PRIVATE ${FFMPEG_ATOMICS_INCLUDE}
 )
 target_compile_definitions(libavcodec PRIVATE ${FFMPEG_COMMON_DEFINES})
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    target_include_directories(libavcodec BEFORE PRIVATE "${FFMPEG_FREEBSD_CONFIG_DIR}")
+endif()
 target_compile_options(libavcodec PRIVATE -w)  # Suppress warnings in third-party code
 target_link_libraries(libavcodec PUBLIC libavutil)
 if(WIN32)

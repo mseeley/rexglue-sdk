@@ -26,7 +26,11 @@
 #include <rex/ui/overlay/debug_overlay.h>
 #include <rex/ui/overlay/settings_overlay.h>
 #include <rex/audio/audio_system.h>
+#if REX_HAS_SDL
 #include <rex/audio/sdl/sdl_audio_system.h>
+#else
+#include <rex/audio/nop/nop_audio_system.h>
+#endif
 #include <rex/input/input_system.h>
 #include <rex/kernel/init.h>
 #include <rex/string/numeric.h>
@@ -307,7 +311,12 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
 
 bool ReXApp::SetupPresentation() {
   config_.gpu_plugin = REXCVAR_GET(gpu_plugin);
+#if REX_HAS_SDL
   config_.audio_factory = REX_AUDIO_BACKEND(rex::audio::sdl::SDLAudioSystem);
+#else
+  // Without SDL the game sets its own backend in OnPreSetup.
+  config_.audio_factory = REX_AUDIO_BACKEND(rex::audio::nop::NopAudioSystem);
+#endif
   config_.input_factory = REX_INPUT_BACKEND(rex::input::CreateDefaultInputSystem);
   config_.kernel_init = rex::kernel::InitializeKernel;
 

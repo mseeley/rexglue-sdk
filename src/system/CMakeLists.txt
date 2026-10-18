@@ -91,7 +91,7 @@ target_link_libraries(rexruntime
         fmt::fmt
         spdlog::spdlog
         tomlplusplus
-        SDL3::SDL3
+        $<$<BOOL:${REXGLUE_USE_SDL}>:SDL3::SDL3>
     PRIVATE
         aes128
         mspack
@@ -133,11 +133,15 @@ if(REXGLUE_USE_VULKAN)
     if(REXGLUE_VULKAN_LINKED_LOADER)
         # vulkan_instance.cpp (rexui) calls vkGetInstanceProcAddr directly;
         # whatever provides it is linked here.
+        # On the PS5 the game links the driver (RADV and its
+        # vkGetInstanceProcAddr shim) itself unless this names it.
         set(_rexglue_vulkan_loader "${REXGLUE_VULKAN_LOADER_LIBRARY}")
-        if(NOT _rexglue_vulkan_loader)
+        if(NOT _rexglue_vulkan_loader AND NOT PS5)
             find_library(REXGLUE_SYSTEM_VULKAN_LOADER NAMES vulkan vulkan-1 REQUIRED)
             set(_rexglue_vulkan_loader "${REXGLUE_SYSTEM_VULKAN_LOADER}")
         endif()
-        target_link_libraries(rexruntime PUBLIC ${_rexglue_vulkan_loader})
+        if(_rexglue_vulkan_loader)
+            target_link_libraries(rexruntime PUBLIC ${_rexglue_vulkan_loader})
+        endif()
     endif()
 endif()
