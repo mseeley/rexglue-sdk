@@ -22,6 +22,10 @@
 #include <rex/string.h>
 #include <rex/ui/vulkan/device.h>
 
+REXCVAR_DEFINE_BOOL(vulkan_shader_float_controls, true, "UI/Vulkan",
+                    "Use the device's shader float controls (denormal flushing, round to nearest "
+                    "even). Turn off to make shaders debuggable in RenderDoc");
+
 REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
@@ -696,7 +700,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     XE_UI_VULKAN_FEATURE_IMPLIED(shaderSampleRateInterpolationFunctions)
   }
 
-  if (ext_1_2_KHR_shader_float_controls) {
+  if (ext_1_2_KHR_shader_float_controls && REXCVAR_GET(vulkan_shader_float_controls)) {
     XE_UI_VULKAN_PROPERTY_2(properties_1_2_KHR_shader_float_controls,
                             shaderSignedZeroInfNanPreserveFloat32);
     XE_UI_VULKAN_PROPERTY_2(properties_1_2_KHR_shader_float_controls,
