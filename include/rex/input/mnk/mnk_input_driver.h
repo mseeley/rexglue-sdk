@@ -15,10 +15,13 @@
 #include <rex/ui/window_listener.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <fstream>
 #include <mutex>
 #include <queue>
 #include <string>
+#include <vector>
 
 namespace rex::input::mnk {
 
@@ -58,7 +61,11 @@ class MnkInputDriver final : public InputDriver,
 
  private:
   bool IsEnabled() const;
+  // Records the change when mnk_record is set. Needs state_mutex_.
   void SetKeyState(uint16_t vk, bool down);
+  // Applies due mnk_replay events. Needs state_mutex_.
+  void AdvanceReplay();
+  uint64_t ElapsedMs() const;
   void EnqueueKeystroke(uint16_t vk_pad, bool down);
 
   // Called from the guest thread. The rest of the capture path stays on the UI
@@ -101,6 +108,23 @@ class MnkInputDriver final : public InputDriver,
 
   // Keystroke queue
   std::queue<X_INPUT_KEYSTROKE> keystroke_queue_;
+
+  // Key record/replay (mnk_record, mnk_replay), timed by guest polls or by
+  // milliseconds since the first poll. Guarded by state_mutex_.
+  struct ReplayEvent {
+    uint64_t poll;
+    uint64_t ms;
+    uint16_t vk;
+    bool down;
+  };
+  uint64_t poll_count_ = 0;
+  std::chrono::steady_clock::time_point first_poll_time_;
+  std::ofstream record_file_;
+  std::vector<ReplayEvent> replay_events_;
+  size_t replay_next_ = 0;
+  bool replaying_ = false;
+  bool replay_by_ms_ = false;
+  bool replay_key_down_[256] = {};
 
   // Packet number incremented on state change
   uint32_t packet_number_ = 0;

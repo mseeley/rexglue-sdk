@@ -21,6 +21,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string_view>
 
 REXCVAR_DEFINE_BOOL(mnk_mode, false, "Input", "Enable keyboard/mouse controller emulation");
@@ -29,6 +31,15 @@ REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
                     "from the keybind_rstick_* keys only");
 REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
     .range(0.01, 10.0);
+
+REXCVAR_DEFINE_STRING(mnk_record, "", "Input",
+                      "Record key presses and releases to this file, for mnk_replay");
+REXCVAR_DEFINE_STRING(mnk_replay, "", "Input",
+                      "Replay key presses from a file written by mnk_record. Replayed keys "
+                      "act regardless of window focus, and live keys still work");
+REXCVAR_DEFINE_STRING(mnk_replay_clock, "polls", "Input",
+                      "Replay timing: 'polls' (guest input polls, follows the game's frame "
+                      "rate) or 'ms' (wall-clock milliseconds since the first poll)");
 
 REXCVAR_DEFINE_STRING(keybind_a, "Semicolon,Space", "Input/Keybinds/Controller", "A button");
 REXCVAR_DEFINE_STRING(keybind_b, "Quote,Backspace", "Input/Keybinds/Controller", "B button");
@@ -158,7 +169,75 @@ MnkInputDriver::~MnkInputDriver() {
 }
 
 X_STATUS MnkInputDriver::Setup() {
+  const std::string& record_path = REXCVAR_GET(mnk_record);
+  if (!record_path.empty()) {
+    record_file_.open(record_path, std::ios::out | std::ios::trunc);
+    if (record_file_) {
+      record_file_ << "# poll ms down|up key\n";
+      REXLOG_INFO("Recording keys to {}", record_path);
+    } else {
+      REXLOG_ERROR("Cannot open {} to record keys", record_path);
+    }
+  }
+  const std::string& replay_path = REXCVAR_GET(mnk_replay);
+  if (!replay_path.empty()) {
+    std::ifstream in(replay_path);
+    if (!in) {
+      REXLOG_ERROR("Cannot open {} to replay keys", replay_path);
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.empty() || line[0] == '#') {
+        continue;
+      }
+      std::istringstream fields(line);
+      ReplayEvent event;
+      std::string action, key;
+      if (!(fields >> event.poll >> event.ms >> action >> key) ||
+          (action != "down" && action != "up")) {
+        REXLOG_WARN("Skipping replay line '{}'", line);
+        continue;
+      }
+      VirtualKey vk = rex::ui::ParseVirtualKey(key);
+      if (vk == VirtualKey::kNone || static_cast<uint16_t>(vk) >= 256) {
+        REXLOG_WARN("Skipping replay line with unknown key '{}'", line);
+        continue;
+      }
+      event.vk = static_cast<uint16_t>(vk);
+      event.down = action == "down";
+      replay_events_.push_back(event);
+    }
+    replaying_ = !replay_events_.empty();
+    replay_by_ms_ = REXCVAR_GET(mnk_replay_clock) == "ms";
+    REXLOG_INFO("Replaying {} key events from {} by {}", replay_events_.size(), replay_path,
+                replay_by_ms_ ? "ms" : "polls");
+  }
   return X_STATUS_SUCCESS;
+}
+
+uint64_t MnkInputDriver::ElapsedMs() const {
+  if (poll_count_ == 0) {
+    return 0;
+  }
+  return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - first_poll_time_)
+                      .count());
+}
+
+void MnkInputDriver::AdvanceReplay() {
+  while (replay_next_ < replay_events_.size()) {
+    const ReplayEvent& event = replay_events_[replay_next_];
+    if (replay_by_ms_ ? event.ms > ElapsedMs() : event.poll > poll_count_) {
+      return;
+    }
+    replay_key_down_[event.vk] = event.down;
+    ++replay_next_;
+  }
+  if (replaying_) {
+    replaying_ = false;
+    std::memset(replay_key_down_, 0, sizeof(replay_key_down_));
+    REXLOG_INFO("Key replay finished at poll {} ({} ms)", poll_count_, ElapsedMs());
+  }
 }
 
 void MnkInputDriver::OnWindowAvailable(rex::ui::Window* window) {
@@ -264,7 +343,16 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   QueueMouseCaptureUpdate(IsEnabled() && REXCVAR_GET(mnk_mouse) && IsMouseLookActive() &&
                           has_focus_ && is_active());
 
-  if (!is_active() || !has_focus_) {
+  std::unique_lock lock(state_mutex_);
+  // The record/replay clock counts every poll, focused or not.
+  if (poll_count_++ == 0) {
+    first_poll_time_ = std::chrono::steady_clock::now();
+  }
+  AdvanceReplay();
+
+  // A replay drives the game unattended, so it ignores focus.
+  if (!replaying_ && (!is_active() || !has_focus_)) {
+    lock.unlock();
     if (out_state) {
       std::memset(out_state, 0, sizeof(*out_state));
       out_state->packet_number = packet_number_;
@@ -272,63 +360,66 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
     return X_ERROR_SUCCESS;
   }
 
-  std::lock_guard lock(state_mutex_);
+  bool keys[256];
+  for (size_t i = 0; i < 256; ++i) {
+    keys[i] = (has_focus_ && key_down_[i]) || replay_key_down_[i];
+  }
 
   uint16_t buttons = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_a)))
     buttons |= X_INPUT_GAMEPAD_A;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_b)))
     buttons |= X_INPUT_GAMEPAD_B;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_x)))
     buttons |= X_INPUT_GAMEPAD_X;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_y)))
     buttons |= X_INPUT_GAMEPAD_Y;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_left_shoulder)))
     buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_right_shoulder)))
     buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_press)))
     buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_press)))
     buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_back)))
     buttons |= X_INPUT_GAMEPAD_BACK;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_start)))
     buttons |= X_INPUT_GAMEPAD_START;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_guide)))
     buttons |= X_INPUT_GAMEPAD_GUIDE;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_up)))
     buttons |= X_INPUT_GAMEPAD_DPAD_UP;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_down)))
     buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_left)))
     buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_dpad_right)))
     buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
 
-  uint8_t lt = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
-  uint8_t rt = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
+  uint8_t lt = IsBindPressed(keys, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
+  uint8_t rt = IsBindPressed(keys, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
 
   int32_t lx = 0;
   int32_t ly = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_left)))
     lx -= INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_right)))
     lx += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_up)))
     ly += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_lstick_down)))
     ly -= INT16_MAX;
 
   int32_t rx = 0;
   int32_t ry = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_left)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_left)))
     rx -= INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_right)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_right)))
     rx += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_up)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_up)))
     ry += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
+  if (IsBindPressed(keys, REXCVAR_GET(keybind_rstick_down)))
     ry -= INT16_MAX;
 
   if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
@@ -475,8 +566,17 @@ void MnkInputDriver::RecenterCursorFromUIThread(int32_t x, int32_t y) {
 }
 
 void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
-  if (vk < 256) {
-    key_down_[vk] = down;
+  if (vk >= 256 || key_down_[vk] == down) {
+    return;
+  }
+  key_down_[vk] = down;
+  if (record_file_.is_open()) {
+    std::string name = rex::ui::VirtualKeyToString(static_cast<VirtualKey>(vk));
+    if (!name.empty()) {
+      // Flushed per line so a killed process keeps its recording.
+      record_file_ << poll_count_ << ' ' << ElapsedMs() << ' ' << (down ? "down" : "up") << ' '
+                   << name << std::endl;
+    }
   }
 }
 
@@ -565,7 +665,9 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   mouse_capture_requested_.store(false, std::memory_order_relaxed);
   {
     std::lock_guard lock(state_mutex_);
-    std::memset(key_down_, 0, sizeof(key_down_));
+    for (uint16_t vk = 0; vk < 256; ++vk) {
+      SetKeyState(vk, false);
+    }
     mouse_dx_ = 0.0f;
     mouse_dy_ = 0.0f;
   }
