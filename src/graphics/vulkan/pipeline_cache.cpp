@@ -1242,6 +1242,16 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;
   }
+
+  // Dump shader files if desired.
+  if (!REXCVAR_GET(dump_shaders).empty()) {
+    bool edram_fsi_used =
+        render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
+    translation.Dump(REXCVAR_GET(dump_shaders), (shader.type() == xenos::ShaderType::kPixel)
+                                                    ? (edram_fsi_used ? "vulkan_fsi" : "vulkan_rt")
+                                                    : "vulkan");
+  }
+
   if (translation.GetOrCreateShaderModule() == VK_NULL_HANDLE) {
     return false;
   }
