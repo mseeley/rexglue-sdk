@@ -14,7 +14,7 @@
 #include <rex/platform.h>
 #include <cstddef>
 
-#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+#if (REX_PLATFORM_LINUX && !REX_PLATFORM_PS5) || REX_PLATFORM_MAC
 #if REX_PLATFORM_MAC && !defined(_XOPEN_SOURCE)
 // Darwin hides the deprecated ucontext APIs unless _XOPEN_SOURCE is defined
 // before including <ucontext.h>.
@@ -55,6 +55,10 @@ struct Fiber {
 
 #if REX_PLATFORM_WIN32
   void* handle_ = nullptr;
+  bool is_thread_fiber_ = false;
+#elif REX_PLATFORM_PS5
+  // No ucontext_t: the console's getcontext writes past the size its headers
+  // declare (fiber_ps5.cpp).
   bool is_thread_fiber_ = false;
 #elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
   ucontext_t context_{};
