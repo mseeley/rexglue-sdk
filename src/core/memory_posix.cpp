@@ -615,6 +615,10 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Only the descriptor is used from here on. Without the name, the memory is
+  // freed when the process ends however it ends; a killed or crashed run left
+  // its 4.5 GiB object in /dev/shm until the next runs failed with SIGBUS.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }
