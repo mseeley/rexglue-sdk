@@ -427,6 +427,9 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
         rex::path_to_utf8(pipeline_storage_file_path));
     return;
   }
+  // "a+" leaves the read position at the end of the file on BSD libcs
+  // (macOS, FreeBSD) and at the start on glibc. Read the header from the start.
+  rewind(pipeline_storage_file_);
   pipeline_storage_file_flush_needed_ = false;
   // 'XEPS'.
   const uint32_t pipeline_storage_magic = 0x53504558;
@@ -512,6 +515,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     pipeline_storage_file_ = nullptr;
     return;
   }
+  // See the pipeline storage file above.
+  rewind(shader_storage_file_);
   ++shader_storage_index_;
   shader_storage_file_flush_needed_ = false;
   struct {
