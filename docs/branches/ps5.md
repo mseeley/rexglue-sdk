@@ -59,6 +59,7 @@ applies there in general, and for the PS5 only where it doesn't:
 | RenderDoc | Stubbed on the PS5, as on macOS (the vendored header only knows Windows and Linux). This also guards `renderdoc_capture_trigger_file`, which didn't compile without the header. |
 | FFmpeg | `thirdparty/ffmpeg-config-freebsd/config.h`, put ahead of FFmpeg's own `config.h` on FreeBSD targets. It is the Linux x86-64 config without memalign, sched_getaffinity, `<malloc.h>`, `<asm/types.h>`, perf events and iconv. The FFmpeg submodule is unchanged. |
 | Link libraries | `rexcore` links no `pthread`/`rt`/`dl` on the PS5. |
+| Shader storage | The `.xsh` and `.vk.xpso` files are rewound after `fopen("a+b")`: BSD libcs start reading at the end of the file, so the header read failed and both files were truncated at every launch. |
 
 **Running on the console.** These change behaviour on the PS5 only:
 
