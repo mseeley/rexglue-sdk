@@ -123,6 +123,11 @@ if(REXGLUE_USE_D3D12)
     target_link_libraries(rexruntime PUBLIC dxc-headers)
     target_compile_definitions(rexruntime PUBLIC REX_HAS_D3D12=1)
 endif()
+# rex_app.cpp, compiled into the game, picks SDL audio by this; the
+# directory-wide definition doesn't reach the game's target.
+if(REXGLUE_USE_SDL)
+    target_compile_definitions(rexruntime PUBLIC REX_HAS_SDL=1)
+endif()
 if(REXGLUE_USE_VULKAN)
     target_link_libraries(rexruntime PUBLIC
         Vulkan::Headers
