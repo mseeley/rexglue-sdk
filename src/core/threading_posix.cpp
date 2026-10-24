@@ -42,6 +42,12 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 #include <sched.h>
 
+#if REX_PLATFORM_PS5
+#include <chrono>
+#include <vector>
+
+#include <ps5platform/kernel.h>
+#endif
 #if defined(__FreeBSD__)
 #include <pthread_np.h>
 #include <sys/cpuset.h>
@@ -635,6 +641,73 @@ struct ThreadStartData {
   Thread* thread_obj;
 };
 
+#if REX_PLATFORM_PS5
+// Thread stacks in direct memory. A stack pthread_create allocates comes from
+// the title's 448 MiB flexible budget, which a game's 16 MiB guest-thread
+// stacks use up after a couple of dozen threads (the PS5 ports of Midnight
+// Club: LA and KongaTime's ReXGlue template both hit this). Direct memory is
+// 12 GiB. Each stack is one direct allocation mapped above a no-access guard.
+//
+// A stack is reused rather than released: nothing says when a finished
+// thread has left its stack for good, so it returns to the pool when the
+// thread object is destroyed after finishing, and is handed out again only
+// after a while.
+struct DirectStack {
+  void* base = nullptr;
+  size_t size = 0;
+  std::chrono::steady_clock::time_point retired;
+};
+
+static std::mutex direct_stack_mutex_;
+static std::vector<DirectStack> direct_stack_pool_;
+
+static bool AcquireDirectStack(size_t size, DirectStack& out) {
+  constexpr size_t kUnit = PS5_KERNEL_DIRECT_ALIGNMENT;
+  size = (size + kUnit - 1) & ~(kUnit - 1);
+  {
+    std::lock_guard<std::mutex> lock(direct_stack_mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = direct_stack_pool_.begin(); it != direct_stack_pool_.end(); ++it) {
+      if (it->size == size && now - it->retired > std::chrono::seconds(2)) {
+        out = *it;
+        direct_stack_pool_.erase(it);
+        return true;
+      }
+    }
+  }
+  // Reserved with an address, so it never lands in the Vulkan driver's GPU
+  // window; the first unit stays reserved and inaccessible, as the guard.
+  void* reserved = reinterpret_cast<void*>(uintptr_t(0x30'0000'0000ull));
+  if (sceKernelReserveVirtualRange(&reserved, size + kUnit, 0, kUnit) != 0 || !reserved) {
+    return false;
+  }
+  int64_t start = -1;
+  if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), size, kUnit,
+                                    PS5_KERNEL_DIRECT_TYPE_CPU, &start) != 0) {
+    sceKernelMunmap(reserved, size + kUnit);
+    return false;
+  }
+  void* base = static_cast<uint8_t*>(reserved) + kUnit;
+  void* mapped = base;
+  if (sceKernelMapDirectMemory(&mapped, size, PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE,
+                               PS5_KERNEL_MAP_FIXED, start, kUnit) != 0 ||
+      mapped != base) {
+    sceKernelReleaseDirectMemory(start, size);
+    sceKernelMunmap(reserved, size + kUnit);
+    return false;
+  }
+  out.base = base;
+  out.size = size;
+  return true;
+}
+
+static void RetireDirectStack(DirectStack stack) {
+  stack.retired = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(direct_stack_mutex_);
+  direct_stack_pool_.push_back(stack);
+}
+#endif  // REX_PLATFORM_PS5
+
 template <>
 class PosixCondition<Thread> : public PosixConditionBase {
   enum class State {
@@ -665,10 +738,23 @@ class PosixCondition<Thread> : public PosixConditionBase {
     pthread_attr_t attr;
     if (pthread_attr_init(&attr) != 0)
       return false;
+#if REX_PLATFORM_PS5
+    if (AcquireDirectStack(params.stack_size, direct_stack_)) {
+      if (pthread_attr_setstack(&attr, direct_stack_.base, direct_stack_.size) != 0) {
+        pthread_attr_destroy(&attr);
+        return false;
+      }
+    } else {
+      REXSYS_WARN("PS5: no direct-memory stack of {} KiB; using a flexible-memory one",
+                  params.stack_size / 1024);
+#endif
     if (pthread_attr_setstacksize(&attr, params.stack_size) != 0) {
       pthread_attr_destroy(&attr);
       return false;
     }
+#if REX_PLATFORM_PS5
+    }
+#endif
     // Linux threads inherit their creator's scheduling unless
     // PTHREAD_EXPLICIT_SCHED is set, so these attributes change nothing there.
     // The PS5's libkernel numbers priorities in its own range (the PS4 SDK's
@@ -717,6 +803,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
     // Match Canary/Edge behavior.
     // Force-cancel/join from the condition destructor can self-join/crash
     // depending on shutdown ordering, so threads must be stopped explicitly.
+#if REX_PLATFORM_PS5
+    if (direct_stack_.base && state_ == State::kFinished) {
+      RetireDirectStack(direct_stack_);
+    }
+#endif
   }
 
   bool Signal() override { return true; }
@@ -1072,6 +1163,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
 #else
   sem_t suspend_sem_;
   sem_t* suspend_sem_ptr() { return &suspend_sem_; }
+#endif
+#if REX_PLATFORM_PS5
+  DirectStack direct_stack_;
 #endif
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
