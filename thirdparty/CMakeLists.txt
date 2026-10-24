@@ -244,6 +244,7 @@ target_compile_options(imgui PRIVATE -w)
 #=============================================================================
 # SDL3 - Cross-platform media layer
 #=============================================================================
+if(REXGLUE_USE_SDL)
 set(SDL_INSTALL ON CACHE BOOL "" FORCE)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -302,6 +303,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 add_subdirectory(sdl3)
+endif()
 
 #=============================================================================
 # DXC API headers (vendored from DirectXShaderCompiler, runtime-loaded)
