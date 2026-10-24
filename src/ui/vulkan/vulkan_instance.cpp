@@ -25,6 +25,13 @@
 #include "vulkan_moltenvk.h"
 #endif
 
+#if REX_VULKAN_LINKED_LOADER
+// The SDK builds with VK_NO_PROTOTYPES, so the linked loader's entry point is
+// declared here (REXGLUE_VULKAN_LINKED_LOADER, REXGLUE_VULKAN_LOADER_LIBRARY).
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance,
+                                                                          const char* pName);
+#endif
+
 REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan debug messages");
 
 namespace rex {
@@ -74,7 +81,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     }
     return nullptr;
   }
-#else
+#elif !REX_VULKAN_LINKED_LOADER
   loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
   if (!loader_loaded) {
     REXLOG_ERROR("Failed to load {}", platform::lib_names::kVulkanLoader);
@@ -82,6 +89,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   }
 #endif
 
+#if REX_VULKAN_LINKED_LOADER
+  // vkDestroyInstance is taken from the instance once it exists.
+  (void)loader_loaded;
+  ifn.vkGetInstanceProcAddr = ::vkGetInstanceProcAddr;
+  REXLOG_INFO("Using the Vulkan loader linked into the executable");
+#else
 #define XE_VULKAN_LOAD_LOADER_FUNCTION(name) \
   functions_loaded &= (ifn.name = vulkan_instance->loader_.GetSymbol<PFN_##name>(#name)) != nullptr;
   XE_VULKAN_LOAD_LOADER_FUNCTION(vkGetInstanceProcAddr);
@@ -91,6 +104,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     REXLOG_ERROR("Failed to get Vulkan loader function pointers");
     return nullptr;
   }
+#endif
 
   // Load global functions.
 
@@ -385,6 +399,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   }
 
   // Load instance functions.
+
+#if REX_VULKAN_LINKED_LOADER
+  functions_loaded &= (ifn.vkDestroyInstance = PFN_vkDestroyInstance(ifn.vkGetInstanceProcAddr(
+                           vulkan_instance->instance_, "vkDestroyInstance"))) != nullptr;
+#endif
 
 #define XE_UI_VULKAN_FUNCTION(name)                                                            \
   functions_loaded &=                                                                          \

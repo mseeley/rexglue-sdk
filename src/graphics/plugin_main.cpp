@@ -51,3 +51,11 @@ extern "C" REX_GPU_PLUGIN_EXPORT rex::system::IGraphicsSystem* rex_gpu_create(
   REXLOG_ERROR("rexgpu-xenos: requested backend '{}' is not compiled into this plugin", backend);
   return nullptr;
 }
+
+#if REX_STATIC_RUNTIME
+namespace {
+const bool registered = (rex::system::RegisterStaticGpuPlugin(
+                             REX_GPU_PLUGIN_NAME, rex_gpu_abi_version, rex_gpu_create),
+                         true);
+}  // namespace
+#endif

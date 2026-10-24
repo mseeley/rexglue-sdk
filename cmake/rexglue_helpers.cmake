@@ -63,6 +63,20 @@ function(rexglue_apply_target_settings target_name)
 endfunction()
 
 #==========================================================
+# rexglue_link_runtime_whole_archive(<target>)
+#
+# With REXGLUE_STATIC_RUNTIME, rexruntime is a static archive whose kernel
+# exports and cvars register from static initializers that nothing references,
+# so a plain link would drop them. Links it whole into <target>, wherever it
+# appears among <target>'s link dependencies. No-op for the shared runtime.
+#==========================================================
+function(rexglue_link_runtime_whole_archive target_name)
+    if(REXGLUE_STATIC_RUNTIME)
+        set_property(TARGET ${target_name} PROPERTY LINK_LIBRARY_OVERRIDE_rexruntime WHOLE_ARCHIVE)
+    endif()
+endfunction()
+
+#==========================================================
 # rexglue_configure_target(<target>) - Host application
 #
 # Adds:
@@ -73,6 +87,8 @@ endfunction()
 #   - Windows POST_BUILD copy of TARGET_RUNTIME_DLLS and the FidelityFX DLLs.
 #     Guest modules colocate with the host (see rexglue_configure_module_target),
 #     so this single copy handles them transitively.
+#   - With REXGLUE_STATIC_RUNTIME: rexruntime and the GPU_PLUGINS linked whole
+#     into the executable instead of staged next to it.
 #==========================================================
 function(rexglue_configure_target target_name)
     cmake_parse_arguments(ARG "" "" "GPU_PLUGINS" ${ARGN})
@@ -100,6 +116,25 @@ function(rexglue_configure_target target_name)
     endif()
 
     rexglue_apply_target_settings(${target_name})
+
+    if(REXGLUE_STATIC_RUNTIME)
+        rexglue_link_runtime_whole_archive(${target_name})
+        foreach(_plugin IN LISTS ARG_GPU_PLUGINS)
+            if(NOT TARGET rexgpu-${_plugin})
+                message(FATAL_ERROR
+                    "rexglue_configure_target: unknown GPU plugin '${_plugin}' (no target "
+                    "rexgpu-${_plugin}; REXGLUE_STATIC_RUNTIME needs an in-tree SDK)")
+            endif()
+            # Whole, so the plugin's registration object is kept.
+            target_link_libraries(${target_name} PRIVATE rexgpu-${_plugin})
+            set_property(TARGET ${target_name}
+                PROPERTY LINK_LIBRARY_OVERRIDE_rexgpu-${_plugin} WHOLE_ARCHIVE)
+        endforeach()
+        if(APPLE AND REXGLUE_USE_VULKAN AND NOT REXGLUE_VULKAN_LINKED_LOADER)
+            _rexglue_stage_macos_vulkan_runtime(${target_name})
+        endif()
+        return()
+    endif()
 
     if(WIN32)
         # Stage runtime DLLs (rexruntime, TracyClient, etc.) next to the host

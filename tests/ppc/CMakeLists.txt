@@ -48,6 +48,7 @@ add_executable(ppc_tests
     ${PPC_GEN_DIR}/ppc_test_functions.cpp
     ${PPC_GEN_DIR}/ppc_test_cases.cpp
 )
+rexglue_link_runtime_whole_archive(ppc_tests)
 
 set_source_files_properties(
     ${PPC_GEN_DIR}/ppc_test_functions.cpp
