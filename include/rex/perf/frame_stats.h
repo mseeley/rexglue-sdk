@@ -28,6 +28,7 @@ enum class Stat : uint32_t {
   kShadersTranslated,
   kShaderTranslateUs,
   kShaderTranslateCpuUs,  // thread CPU time of the above
+  kCpTranslateUs,         // command processor translating shaders itself
   kTextureLoads,
   kTextureLoadUs,
   kFileReads,

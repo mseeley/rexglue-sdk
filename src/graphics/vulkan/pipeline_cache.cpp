@@ -1013,6 +1013,8 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
 
 bool VulkanPipelineCache::EnsureShadersTranslated(VulkanShader::VulkanTranslation* vertex_shader,
                                                   VulkanShader::VulkanTranslation* pixel_shader) {
+  rex::perf::frame_stats::ScopedTimer cp_translate_timer(
+      rex::perf::frame_stats::Stat::kCpTranslateUs);
   // Edge flags are not supported yet (because polygon primitives are not).
   assert_true(register_file_.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode !=
                   xenos::VertexShaderExportMode::kPosition2VectorsEdge &&
