@@ -1620,6 +1620,20 @@ std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t
     registers_text = fmt::format(
         ", r3 {:08X} r4 {:08X} r5 {:08X} r21 {:08X} r23 {:08X} r31 {:08X}", ctx->r3.u32,
         ctx->r4.u32, ctx->r5.u32, ctx->r21.u32, ctx->r23.u32, ctx->r31.u32);
+    // The bytes the late copy (source r21, size r23) is copying, when small,
+    // to compare with the microcode once complete.
+    uint32_t copy_source = ctx->r21.u32, copy_size = ctx->r23.u32;
+    memory::BaseHeap* heap = memory->LookupHeap(copy_source);
+    uint32_t protect = 0;
+    if (copy_size && copy_size <= 512 && !(copy_size & 3) && heap &&
+        heap->QueryProtect(copy_source, &protect) && (protect & memory::kMemoryProtectRead)) {
+      registers_text += ", copy source bytes";
+      const uint8_t* bytes = memory->TranslateVirtual<const uint8_t*>(copy_source);
+      for (uint32_t i = 0; i < copy_size; i += 4) {
+        registers_text += fmt::format(" {:02X}{:02X}{:02X}{:02X}", bytes[i], bytes[i + 1],
+                                      bytes[i + 2], bytes[i + 3]);
+      }
+    }
   }
   if (fault.pc && thread_state) {
     PPCContext* ctx = thread_state->context();
@@ -1728,8 +1742,16 @@ void StartShaderOriginsWatch(memory::Memory* memory) {
           if (readable(watched.address) && readable(watched.address + watched.size - 1) &&
               XXH3_64bits(memory->TranslateVirtual(watched.address), watched.size) ==
                   watched.hash) {
-            REXGPU_INFO("shader_origins: microcode {:016X} present at {:08X}", watched.hash,
-                        watched.address);
+            std::string bytes_text;
+            if (watched.size <= 512) {
+              const uint8_t* bytes = memory->TranslateVirtual<const uint8_t*>(watched.address);
+              for (uint32_t i = 0; i < watched.size; i += 4) {
+                bytes_text += fmt::format(" {:02X}{:02X}{:02X}{:02X}", bytes[i], bytes[i + 1],
+                                          bytes[i + 2], bytes[i + 3]);
+              }
+            }
+            REXGPU_INFO("shader_origins: microcode {:016X} present at {:08X}{}{}", watched.hash,
+                        watched.address, bytes_text.empty() ? "" : ", bytes", bytes_text);
             present.push_back(watched.hash);
           } else {
             // Catch the next write to it. A write unprotects the whole page,
