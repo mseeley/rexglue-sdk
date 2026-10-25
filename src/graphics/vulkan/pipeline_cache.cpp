@@ -24,6 +24,7 @@
 #include <fmt/format.h>
 
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/filesystem.h>
@@ -1129,6 +1130,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
   if (it != pipelines_.end()) {
     VkPipeline found_pipeline = it->second.pipeline.load(std::memory_order_acquire);
     if (found_pipeline == VK_NULL_HANDLE) {
+      rex::perf::frame_stats::ScopedTimer block_timer(
+          rex::perf::frame_stats::Stat::kPipelineBlockUs);
       PipelineCreationArguments creation_arguments;
       if (!TryGetPipelineCreationArgumentsForDescription(description, &*it, creation_arguments) ||
           !EnsurePipelineCreated(creation_arguments)) {
@@ -1148,6 +1151,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
   }
 
   // Create the pipeline if not already existing.
+  rex::perf::frame_stats::ScopedTimer block_timer(rex::perf::frame_stats::Stat::kPipelineBlockUs);
   auto& pipeline = *pipelines_.emplace(description, Pipeline()).first;
   PipelineCreationArguments creation_arguments_real;
   if (!TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
@@ -1238,6 +1242,9 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
 
   // Perform translation.
   // If this fails the shader will be marked as invalid and ignored later.
+  rex::perf::frame_stats::ScopedTimer translate_timer(
+      rex::perf::frame_stats::Stat::kShaderTranslateUs,
+      rex::perf::frame_stats::Stat::kShadersTranslated);
   if (!translator.TranslateAnalyzedShader(translation)) {
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;
@@ -3490,8 +3497,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  VkResult create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
-                                                         &pipeline_create_info, nullptr, &pipeline);
+  VkResult create_result;
+  {
+    rex::perf::frame_stats::ScopedTimer create_timer(
+        rex::perf::frame_stats::Stat::kPipelineCreateUs,
+        rex::perf::frame_stats::Stat::kPipelinesCreated);
+    create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info,
+                                                  nullptr, &pipeline);
+  }
   if (create_result != VK_SUCCESS) {
     uint64_t ps_hash = creation_arguments.pixel_shader
                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()

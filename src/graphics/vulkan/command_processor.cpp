@@ -25,6 +25,7 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <glslang/Public/ShaderLang.h>
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
@@ -3661,6 +3662,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kDraws, 1);
 
   const RegisterFile& regs = *register_file_;
   (void)index_buffer_info;
@@ -5103,9 +5105,13 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
     // defined by vkQueueSubmit additionally include in the first
     // synchronization scope all commands that occur earlier in submission
     // order."
-    VkResult wait_result =
-        dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
-                            submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    VkResult wait_result;
+    {
+      rex::perf::frame_stats::ScopedTimer wait_timer(rex::perf::frame_stats::Stat::kFenceWaitUs,
+                                                     rex::perf::frame_stats::Stat::kFenceWaits);
+      wait_result = dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
+                                        submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    }
     if (wait_result == VK_SUCCESS) {
       fences_awaited += await_submission - submission_completed_;
     } else {

@@ -18,6 +18,7 @@
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/dbg.h>
 #include <rex/perf/counter.h>
 #include <rex/chrono/clock.h>
@@ -216,6 +217,7 @@ void CommandProcessor::WorkerThreadMain() {
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
+      rex::perf::frame_stats::ScopedTimer idle_timer(rex::perf::frame_stats::Stat::kCpIdleUs);
       PrepareForWait();
       uint32_t loop_count = 0;
       do {
@@ -944,6 +946,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   }
 #endif
   rex::perf::Profiler::Flip();
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpSwaps, 1);
 
   // Xenia-specific VdSwap hook.
   // VdSwap will post this to tell us we need to swap the screen/fire an
