@@ -957,6 +957,16 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
 #endif
   rex::perf::Profiler::Flip();
   rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpSwaps, 1);
+  if (rex::perf::frame_stats::enabled()) {
+    // The command processor's CPU time since its previous swap, to compare
+    // with its wall time (not idle and not waiting).
+    static uint64_t last_cpu_us = 0;
+    uint64_t cpu_us = rex::perf::frame_stats::ThreadCpuUs();
+    if (last_cpu_us) {
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpCpuUs, cpu_us - last_cpu_us);
+    }
+    last_cpu_us = cpu_us;
+  }
 
   // Xenia-specific VdSwap hook.
   // VdSwap will post this to tell us we need to swap the screen/fire an

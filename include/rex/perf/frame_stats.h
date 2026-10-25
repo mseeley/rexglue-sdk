@@ -50,6 +50,19 @@ enum class Stat : uint32_t {
   kGuestSwapThreadCpuUs,  // CPU time of the thread calling VdSwap, between its swaps
   kGpuBusyUs,             // GPU time of command processor submissions (timestamps)
   kGpuSubmissions,        // submissions whose GPU time was read
+  // The command processor thread: its CPU time between swaps, and the wall
+  // time of the parts of a Vulkan draw and a submission (LapTimer).
+  kCpCpuUs,
+  kCpDrawSetupUs,         // submission, primitive processing, shaders, samplers
+  kCpDrawTexturesUs,      // texture cache RequestTextures
+  kCpDrawRenderTargetsUs, // render target cache Update
+  kCpDrawPipelineUs,      // pipeline configuration and binding
+  kCpDrawStateUs,         // dynamic state, system constants, descriptor bindings
+  kCpDrawMemoryUs,        // vertex buffer and memexport ranges in shared memory
+  kCpDrawRecordUs,        // barriers, render pass, the draw command
+  kCpReplayUs,            // deferred command buffer into the Vulkan one
+  kCpQueueSubmitUs,       // vkQueueSubmit
+  kCpOutputUs,            // presenter RefreshGuestOutput, including the frame's last submission
   kCount
 };
 
@@ -85,6 +98,25 @@ ThreadUsage GetThreadUsage();
 // Called by VdSwap on the guest thread; logs once a second and for each slow
 // frame.
 void OnGuestSwap();
+
+// Times consecutive parts of one function: each Lap adds the time since the
+// previous Lap (or construction) to a stat. Costs a cvar read while
+// log_frame_stats is off.
+class LapTimer {
+ public:
+  LapTimer() : last_(enabled() ? NowUs() : 0) {}
+  void Lap(Stat stat) {
+    if (!last_) {
+      return;
+    }
+    uint64_t now = NowUs();
+    Add(stat, now - last_);
+    last_ = now;
+  }
+
+ private:
+  uint64_t last_;
+};
 
 // Adds the elapsed microseconds to a stat, optionally the thread CPU time
 // used meanwhile to another, and optionally counts one event.

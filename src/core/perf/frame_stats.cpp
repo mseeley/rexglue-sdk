@@ -64,7 +64,9 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       "faults {}, preempts {}, blocks {}; pixel {} ({:.1f} ms, cpu {:.1f} ms)) | "
       "textures {} ({:.1f} ms) | files {} {:.2f} MB ({:.1f} ms) | faults {} ({:.1f} ms) | xma "
       "drained {} starved {} | guest swap thread cpu {:.1f} ms | gpu {:.1f} ms ({} "
-      "submissions)",
+      "submissions) | cp cpu {:.1f} ms | draw setup {:.1f} textures {:.1f} rts {:.1f} "
+      "pipeline {:.1f} state {:.1f} memory {:.1f} record {:.1f} ms | replay {:.1f} submit "
+      "{:.1f} output {:.1f} ms",
       d(Stat::kCpSwaps), ms(Stat::kCpIdleUs), ms(Stat::kCpWaitUs), d(Stat::kFenceWaits),
       ms(Stat::kFenceWaitUs), d(Stat::kDraws), d(Stat::kPipelinesCreated),
       ms(Stat::kPipelineCreateUs), ms(Stat::kPipelineCreateCpuUs), ms(Stat::kPipelineBlockUs),
@@ -77,7 +79,11 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       ms(Stat::kTextureLoadUs), d(Stat::kFileReads),
       double(d(Stat::kFileReadBytes)) / (1024.0 * 1024.0), ms(Stat::kFileReadUs),
       d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained), d(Stat::kXmaStarved),
-      ms(Stat::kGuestSwapThreadCpuUs), ms(Stat::kGpuBusyUs), d(Stat::kGpuSubmissions));
+      ms(Stat::kGuestSwapThreadCpuUs), ms(Stat::kGpuBusyUs), d(Stat::kGpuSubmissions),
+      ms(Stat::kCpCpuUs), ms(Stat::kCpDrawSetupUs), ms(Stat::kCpDrawTexturesUs),
+      ms(Stat::kCpDrawRenderTargetsUs), ms(Stat::kCpDrawPipelineUs), ms(Stat::kCpDrawStateUs),
+      ms(Stat::kCpDrawMemoryUs), ms(Stat::kCpDrawRecordUs), ms(Stat::kCpReplayUs),
+      ms(Stat::kCpQueueSubmitUs), ms(Stat::kCpOutputUs));
 }
 
 }  // namespace

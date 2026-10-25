@@ -2482,6 +2482,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
 
+  rex::perf::frame_stats::LapTimer output_laps;
   presenter->RefreshGuestOutput(
       guest_output_width, guest_output_height, display_width, display_height,
       [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
@@ -2997,6 +2998,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         EndSubmission(true);
         return true;
       });
+  output_laps.Lap(rex::perf::frame_stats::Stat::kCpOutputUs);
 
   // End the frame even if did not present for any reason (the image refresher
   // was not called), to prevent leaking per-frame resources.
@@ -3668,6 +3670,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
   rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kDraws, 1);
+  rex::perf::frame_stats::LapTimer draw_laps;
 
   const RegisterFile& regs = *register_file_;
   (void)index_buffer_info;
@@ -3930,7 +3933,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   uint32_t used_texture_mask =
       vertex_shader->GetUsedTextureMaskAfterTranslation() |
       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawSetupUs);
   texture_cache_->RequestTextures(used_texture_mask);
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawTexturesUs);
 
   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
   // Set up the render targets - this may perform dispatches and draws.
@@ -3938,6 +3943,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                     normalized_color_mask, *vertex_shader)) {
     return draw_fail("render_target_update");
   }
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawRenderTargetsUs);
 
   // Create the pipeline (for this, need the render pass from the render target
   // cache), translating the shaders - doing this now to obtain the used
@@ -3968,6 +3974,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     current_guest_graphics_pipeline_ = pipeline;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
   }
+
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawPipelineUs);
 
   // Update the graphics pipeline, and if the new graphics pipeline has a
   // different layout, invalidate incompatible descriptor sets before updating
@@ -4071,6 +4079,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (!UpdateBindings(vertex_shader, pixel_shader)) {
     return draw_fail("update_bindings");
   }
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawStateUs);
 
   // Ensure vertex buffers are resident.
   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
@@ -4203,6 +4212,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
   }
 
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawMemoryUs);
+
   // After all commands that may dispatch, copy or insert barriers, submit
   // the barriers (may end the render pass), and (re)enter the render pass
   // before drawing.
@@ -4248,6 +4259,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     deferred_command_buffer_.CmdVkDrawIndexed(primitive_processing_result.host_draw_vertex_count, 1,
                                               0, 0, 0);
   }
+
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawRecordUs);
 
   // Invalidate textures in memexported memory and watch for changes.
   if (!memexport_ranges_.empty()) {
@@ -5621,7 +5634,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                               gpu_timestamp_query_pool_, gpu_timestamp_slot * 2);
     }
+    rex::perf::frame_stats::LapTimer submit_laps;
     deferred_command_buffer_.Execute(command_buffer.buffer);
+    submit_laps.Lap(rex::perf::frame_stats::Stat::kCpReplayUs);
     if (gpu_timestamp_slot != UINT32_MAX) {
       dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                               gpu_timestamp_query_pool_, gpu_timestamp_slot * 2 + 1);
@@ -5660,6 +5675,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
     }
+    submit_laps.Lap(rex::perf::frame_stats::Stat::kCpQueueSubmitUs);
     if (submit_result != VK_SUCCESS) {
       REXGPU_ERROR("Failed to submit a Vulkan command buffer");
       if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
