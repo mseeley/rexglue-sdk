@@ -53,6 +53,9 @@ enum class Stat : uint32_t {
   // The command processor thread: its CPU time between swaps, and the wall
   // time of the parts of a Vulkan draw and a submission (LapTimer).
   kCpCpuUs,
+  kCpSysUs,               // ... of it in the kernel
+  kCpPreempts,            // involuntary context switches of the command processor thread
+  kCpBlocks,              // voluntary context switches (waits) of the command processor thread
   kCpDrawSetupUs,         // submission, primitive processing, shaders, samplers
   kCpDrawTexturesUs,      // texture cache RequestTextures
   kCpDrawRenderTargetsUs, // render target cache Update

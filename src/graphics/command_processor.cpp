@@ -962,12 +962,22 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   if (rex::perf::frame_stats::enabled()) {
     // The command processor's CPU time since its previous swap, to compare
     // with its wall time (not idle and not waiting).
+    // Its context switches tell being preempted apart from waiting.
     static uint64_t last_cpu_us = 0;
+    static rex::perf::frame_stats::ThreadUsage last_usage;
     uint64_t cpu_us = rex::perf::frame_stats::ThreadCpuUs();
+    rex::perf::frame_stats::ThreadUsage usage = rex::perf::frame_stats::GetThreadUsage();
     if (last_cpu_us) {
       rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpCpuUs, cpu_us - last_cpu_us);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpSysUs,
+                                  usage.sys_us - last_usage.sys_us);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpPreempts,
+                                  usage.preempts - last_usage.preempts);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpBlocks,
+                                  usage.blocks - last_usage.blocks);
     }
     last_cpu_us = cpu_us;
+    last_usage = usage;
   }
 
   // Xenia-specific VdSwap hook.
