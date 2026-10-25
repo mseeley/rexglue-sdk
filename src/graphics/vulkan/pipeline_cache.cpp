@@ -1262,7 +1262,14 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
                                                     : "vulkan");
   }
 
-  if (translation.GetOrCreateShaderModule() == VK_NULL_HANDLE) {
+  VkShaderModule shader_module;
+  {
+    rex::perf::frame_stats::ScopedTimer module_timer(
+        rex::perf::frame_stats::Stat::kShaderModuleUs, rex::perf::frame_stats::Stat::kCount,
+        rex::perf::frame_stats::Stat::kShaderModuleCpuUs);
+    shader_module = translation.GetOrCreateShaderModule();
+  }
+  if (shader_module == VK_NULL_HANDLE) {
     return false;
   }
 
