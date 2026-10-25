@@ -96,7 +96,7 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       "cpu {:.1f} ms, cp {:.1f} ms, module {:.1f} ms cpu {:.1f} ms, sys {:.1f} ms, "
       "faults {}, preempts {}, blocks {}; pixel {} ({:.1f} ms, cpu {:.1f} ms)) | "
       "textures {} ({:.1f} ms) | files {} {:.2f} MB ({:.1f} ms) | faults {} ({:.1f} ms) | xma "
-      "drained {} starved {} | guest swap thread cpu {:.1f} ms | gpu {:.1f} ms ({} "
+      "drained {} starved {} | guest swap thread cpu {:.1f} ms, waits {} {:.1f} ms, delays {:.1f} ms | gpu {:.1f} ms ({} "
       "submissions) | cp cpu {:.1f} ms (sys {:.1f} ms, preempts {}, blocks {}), packets {}, registers {} + {} in blocks | draw setup "
       "{:.1f} textures {:.1f} rts {:.1f} pipeline configure {:.1f} bind {:.1f} state {:.1f} "
       "memory {:.1f} record {:.1f} ms | replay {:.1f} submit {:.1f} output {:.1f} ms | clock "
@@ -113,7 +113,8 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       ms(Stat::kTextureLoadUs), d(Stat::kFileReads),
       double(d(Stat::kFileReadBytes)) / (1024.0 * 1024.0), ms(Stat::kFileReadUs),
       d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained), d(Stat::kXmaStarved),
-      ms(Stat::kGuestSwapThreadCpuUs), ms(Stat::kGpuBusyUs), d(Stat::kGpuSubmissions),
+      ms(Stat::kGuestSwapThreadCpuUs), d(Stat::kGuestSwapThreadWaits),
+      ms(Stat::kGuestSwapThreadWaitUs), ms(Stat::kGuestSwapThreadDelayUs), ms(Stat::kGpuBusyUs), d(Stat::kGpuSubmissions),
       ms(Stat::kCpCpuUs), ms(Stat::kCpSysUs), d(Stat::kCpPreempts), d(Stat::kCpBlocks),
       d(Stat::kCpPackets), d(Stat::kCpRegisterWrites),
       d(Stat::kCpBulkRegisterWrites), ms(Stat::kCpDrawSetupUs), ms(Stat::kCpDrawTexturesUs),
@@ -367,6 +368,14 @@ bool enabled() {
   return REXCVAR_GET(log_frame_stats);
 }
 
+namespace {
+std::atomic<std::thread::id> g_swap_thread{};
+}  // namespace
+
+bool IsGuestSwapThread() {
+  return g_swap_thread.load(std::memory_order_relaxed) == std::this_thread::get_id();
+}
+
 bool draw_parts() {
   return REXCVAR_GET(log_frame_stats) && REXCVAR_GET(log_frame_stats_draw_parts);
 }
@@ -516,6 +525,7 @@ void OnGuestSwap() {
     Add(Stat::kGuestSwapThreadCpuUs, cpu_us - swap_thread_cpu_us);
   }
   swap_thread = std::this_thread::get_id();
+  g_swap_thread.store(swap_thread, std::memory_order_relaxed);
   swap_thread_cpu_us = cpu_us;
   uint64_t now_us = NowUs();
   Totals totals = Snapshot();

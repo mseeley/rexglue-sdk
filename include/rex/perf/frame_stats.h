@@ -48,6 +48,9 @@ enum class Stat : uint32_t {
   kXmaDrained,  // XMA context kicked with its output ring already empty
   kXmaStarved,  // ... and no valid input buffer to decode either
   kGuestSwapThreadCpuUs,  // CPU time of the thread calling VdSwap, between its swaps
+  kGuestSwapThreadWaits,    // ... its guest kernel waits on objects (Ke/NtWaitFor*)
+  kGuestSwapThreadWaitUs,   // ... and their time
+  kGuestSwapThreadDelayUs,  // ... its KeDelayExecutionThread and NtYieldExecution time
   kGpuBusyUs,             // GPU time of command processor submissions (timestamps)
   kGpuSubmissions,        // submissions whose GPU time was read
   // The command processor thread: its CPU time between swaps, and the wall
@@ -112,6 +115,35 @@ ThreadUsage GetThreadUsage();
 // Called by VdSwap on the guest thread; logs once a second and for each slow
 // frame.
 void OnGuestSwap();
+
+// Whether this is the thread that last called VdSwap.
+bool IsGuestSwapThread();
+
+// Adds the time of a guest kernel wait or delay to the swap thread's stats,
+// when on that thread.
+class SwapThreadWait {
+ public:
+  explicit SwapThreadWait(bool delay)
+      : delay_(delay), start_(enabled() && IsGuestSwapThread() ? NowUs() : 0) {}
+  ~SwapThreadWait() {
+    if (!start_) {
+      return;
+    }
+    uint64_t us = NowUs() - start_;
+    if (delay_) {
+      Add(Stat::kGuestSwapThreadDelayUs, us);
+    } else {
+      Add(Stat::kGuestSwapThreadWaitUs, us);
+      Add(Stat::kGuestSwapThreadWaits, 1);
+    }
+  }
+  SwapThreadWait(const SwapThreadWait&) = delete;
+  SwapThreadWait& operator=(const SwapThreadWait&) = delete;
+
+ private:
+  bool delay_;
+  uint64_t start_;
+};
 
 // Times consecutive parts of one function: each Lap adds the time since the
 // previous Lap (or construction) to a stat. Inactive when constructed with
