@@ -1647,6 +1647,28 @@ std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t
           break;
         }
       }
+      // Or the registers still hold the whole copy's destination and source
+      // starts (the recompiled copy may keep its moving pointers in host
+      // registers): the source is the source start plus the shader's offset
+      // into the destination.
+      for (const PPCRegister* destination : registers) {
+        if (found || destination->u32 > watched.address ||
+            watched.address - destination->u32 >= (16u << 20)) {
+          continue;
+        }
+        for (const PPCRegister* source : registers) {
+          uint32_t start = source->u32 + (watched.address - destination->u32);
+          if (source == destination || start == watched.address || !readable(start) ||
+              !readable(start + watched.size - 1)) {
+            continue;
+          }
+          if (XXH3_64bits(memory->TranslateVirtual(start), watched.size) == watched.hash) {
+            sources += fmt::format(" {:016X}@{:08X}", watched.hash, start);
+            found = true;
+            break;
+          }
+        }
+      }
     }
   }
   REXGPU_INFO(
