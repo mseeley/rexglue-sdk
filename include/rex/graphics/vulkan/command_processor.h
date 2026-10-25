@@ -553,8 +553,6 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::mutex pretranslation_requests_mutex_;
   std::vector<system::IGraphicsSystem::PixelShaderPretranslation> pretranslation_requests_;
   std::atomic<bool> pretranslation_requests_pending_{false};
-  // Draws by MSAA mode: pretranslations assume the most used one.
-  std::array<uint64_t, 4> draws_by_msaa_samples_{};
   // When frames with skipped draws started being held back, if they are.
   std::optional<std::chrono::steady_clock::time_point> incomplete_frames_since_;
   // Guest frame index, since some transient resources can be reused across

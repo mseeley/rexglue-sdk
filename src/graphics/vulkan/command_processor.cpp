@@ -3633,9 +3633,6 @@ void VulkanCommandProcessor::ProcessPixelShaderPretranslations() {
     requests.swap(pretranslation_requests_);
     pretranslation_requests_pending_.store(false, std::memory_order_relaxed);
   }
-  auto msaa_samples = xenos::MsaaSamples(
-      std::max_element(draws_by_msaa_samples_.begin(), draws_by_msaa_samples_.end()) -
-      draws_by_msaa_samples_.begin());
   for (const auto& request : requests) {
     uint32_t physical_address = memory_->GetPhysicalAddress(request.guest_address);
     if (physical_address == UINT32_MAX || !request.dword_count) {
@@ -3654,7 +3651,7 @@ void VulkanCommandProcessor::ProcessPixelShaderPretranslations() {
     reg::SQ_INTERPOLATOR_CNTL sq_interpolator_cntl;
     sq_interpolator_cntl.value = request.sq_interpolator_cntl;
     pipeline_cache_->PretranslatePixelShader(*shader, sq_program_cntl, sq_context_misc,
-                                             sq_interpolator_cntl, msaa_samples);
+                                             sq_interpolator_cntl);
   }
 }
 
@@ -3667,7 +3664,6 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   const RegisterFile& regs = *register_file_;
-  ++draws_by_msaa_samples_[uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples)];
   if (pretranslation_requests_pending_.load(std::memory_order_acquire)) {
     ProcessPixelShaderPretranslations();
   }

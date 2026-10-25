@@ -959,7 +959,6 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
   state.sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
   state.sq_context_misc = regs.Get<reg::SQ_CONTEXT_MISC>();
   state.sq_interpolator_cntl = regs.Get<reg::SQ_INTERPOLATOR_CNTL>();
-  state.msaa_samples = regs.Get<reg::RB_SURFACE_INFO>().msaa_samples;
   state.point_list =
       regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kPointList;
   state.normalized_depth_control = normalized_depth_control;
@@ -979,9 +978,14 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetPixelShaderModificat
           shader.GetDynamicAddressableRegisterCount(state.sq_program_cntl.ps_num_reg)));
 
   modification.pixel.interpolator_mask = interpolator_mask;
+  // Centroid sampling only differs from center sampling with more than one
+  // sample, and the host rasterizes with one sample whenever the guest does
+  // (see the multisample state in EnsurePipelineCreated). So the centroid bits
+  // are those of a multisampled draw whatever the MSAA mode, which keeps the
+  // modification predictable before a draw.
   modification.pixel.interpolators_centroid =
       interpolator_mask & ~xenos::GetInterpolatorSamplingPattern(
-                              state.msaa_samples, state.sq_context_misc.sc_sample_cntl,
+                              xenos::MsaaSamples::k4X, state.sq_context_misc.sc_sample_cntl,
                               state.sq_interpolator_cntl.sampling_pattern);
 
   if (param_gen_pos < xenos::kMaxInterpolators) {
@@ -1121,8 +1125,7 @@ bool VulkanPipelineCache::RequestShadersTranslated(VulkanShader::VulkanTranslati
 void VulkanPipelineCache::PretranslatePixelShader(VulkanShader& shader,
                                                   reg::SQ_PROGRAM_CNTL sq_program_cntl,
                                                   reg::SQ_CONTEXT_MISC sq_context_misc,
-                                                  reg::SQ_INTERPOLATOR_CNTL sq_interpolator_cntl,
-                                                  xenos::MsaaSamples msaa_samples) {
+                                                  reg::SQ_INTERPOLATOR_CNTL sq_interpolator_cntl) {
   if (!REXCVAR_GET(vulkan_pretranslate_pixel_shaders) || !REXCVAR_GET(async_shader_compilation) ||
       creation_threads_.empty() || shader.type() != xenos::ShaderType::kPixel) {
     return;
@@ -1139,7 +1142,6 @@ void VulkanPipelineCache::PretranslatePixelShader(VulkanShader& shader,
   state.sq_program_cntl = sq_program_cntl;
   state.sq_context_misc = sq_context_misc;
   state.sq_interpolator_cntl = sq_interpolator_cntl;
-  state.msaa_samples = msaa_samples;
   state.point_list = false;
   // Only used on the host render target path, where the draw's state isn't
   // known yet: the current one is a guess.
