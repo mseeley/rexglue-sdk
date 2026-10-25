@@ -1279,6 +1279,32 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
                                   after.blocks - before.blocks);
     }
   } usage_adder{usage_before};
+  // The pixel shader share of the above, and with log_shader_origins one line
+  // per shader, to compare the cost of each shader type and size.
+  struct TypeAdder {
+    const VulkanShader& shader;
+    uint64_t start = rex::perf::frame_stats::enabled() ? rex::perf::frame_stats::NowUs() : 0;
+    uint64_t cpu_start = start ? rex::perf::frame_stats::ThreadCpuUs() : 0;
+    ~TypeAdder() {
+      if (!start) {
+        return;
+      }
+      uint64_t us = rex::perf::frame_stats::NowUs() - start;
+      uint64_t cpu_us = rex::perf::frame_stats::ThreadCpuUs() - cpu_start;
+      bool is_pixel = shader.type() == xenos::ShaderType::kPixel;
+      if (is_pixel) {
+        rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kPixelShadersTranslated, 1);
+        rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kPixelShaderTranslateUs, us);
+        rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kPixelShaderTranslateCpuUs,
+                                    cpu_us);
+      }
+      if (rex::perf::frame_stats::log_shader_origins()) {
+        REXGPU_INFO("shader_origins: translated {:016X} {} {} dwords {} us cpu {} us",
+                    shader.ucode_data_hash(), is_pixel ? "pixel" : "vertex",
+                    shader.ucode_dword_count(), us, cpu_us);
+      }
+    }
+  } type_adder{shader};
   if (!translator.TranslateAnalyzedShader(translation)) {
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;

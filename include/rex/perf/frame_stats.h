@@ -35,6 +35,9 @@ enum class Stat : uint32_t {
   kShaderTranslateFaults,
   kShaderTranslatePreempts,  // involuntary context switches
   kShaderTranslateBlocks,    // voluntary context switches: waits, such as on a lock
+  kPixelShadersTranslated,   // the pixel shader part of kShadersTranslated
+  kPixelShaderTranslateUs,
+  kPixelShaderTranslateCpuUs,
   kTextureLoads,
   kTextureLoadUs,
   kFileReads,

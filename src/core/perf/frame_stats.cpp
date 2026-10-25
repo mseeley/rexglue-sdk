@@ -60,7 +60,7 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       "cp swaps {} idle {:.0f} ms wait {:.0f} ms | fence {} waits {:.1f} ms | draws {} | "
       "pipelines {} ({:.1f} ms, cpu {:.1f} ms, cp blocked {:.1f} ms) | shaders {} ({:.1f} ms, "
       "cpu {:.1f} ms, cp {:.1f} ms, module {:.1f} ms cpu {:.1f} ms, sys {:.1f} ms, "
-      "faults {}, preempts {}, blocks {}) | "
+      "faults {}, preempts {}, blocks {}; pixel {} ({:.1f} ms, cpu {:.1f} ms)) | "
       "textures {} ({:.1f} ms) | files {} {:.2f} MB ({:.1f} ms) | faults {} ({:.1f} ms) | xma "
       "drained {} starved {}",
       d(Stat::kCpSwaps), ms(Stat::kCpIdleUs), ms(Stat::kCpWaitUs), d(Stat::kFenceWaits),
@@ -69,7 +69,9 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       d(Stat::kShadersTranslated), ms(Stat::kShaderTranslateUs), ms(Stat::kShaderTranslateCpuUs),
       ms(Stat::kCpTranslateUs), ms(Stat::kShaderModuleUs), ms(Stat::kShaderModuleCpuUs),
       ms(Stat::kShaderTranslateSysUs), d(Stat::kShaderTranslateFaults),
-      d(Stat::kShaderTranslatePreempts), d(Stat::kShaderTranslateBlocks), d(Stat::kTextureLoads),
+      d(Stat::kShaderTranslatePreempts), d(Stat::kShaderTranslateBlocks),
+      d(Stat::kPixelShadersTranslated), ms(Stat::kPixelShaderTranslateUs),
+      ms(Stat::kPixelShaderTranslateCpuUs), d(Stat::kTextureLoads),
       ms(Stat::kTextureLoadUs), d(Stat::kFileReads),
       double(d(Stat::kFileReadBytes)) / (1024.0 * 1024.0), ms(Stat::kFileReadUs),
       d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained), d(Stat::kXmaStarved));
