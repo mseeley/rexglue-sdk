@@ -36,6 +36,9 @@ class RegisterFile {
   RegisterFile();
 
   static const RegisterInfo* GetRegisterInfo(uint32_t index);
+  // Whether GetRegisterInfo knows the register, from a table built once: a
+  // bit test, where GetRegisterInfo is a switch over every register.
+  static bool IsKnownRegister(uint32_t index);
 
   static constexpr size_t kRegisterCount = 0x5003;
   uint32_t values[kRegisterCount];

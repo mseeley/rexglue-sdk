@@ -2711,8 +2711,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
       // be unknown. Keep invalidation conservative in this case.
       shared_memory_->RangeWrittenByGpu(0, SharedMemory::kBufferSize);
     }
-    if (IsReadbackMemexportEnabled(REXCVAR_GET(d3d12_readback_memexport)) &&
-        !memexport_ranges_.empty()) {
+    // The cvar check looks the legacy cvar up by name, so only for draws that
+    // export.
+    if (!memexport_ranges_.empty() &&
+        IsReadbackMemexportEnabled(REXCVAR_GET(d3d12_readback_memexport))) {
       uint32_t memexport_total_size = 0;
       for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
         memexport_total_size += memexport_range.size_bytes;
