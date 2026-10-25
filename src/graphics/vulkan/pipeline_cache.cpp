@@ -1248,6 +1248,35 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
       rex::perf::frame_stats::Stat::kShaderTranslateUs,
       rex::perf::frame_stats::Stat::kShadersTranslated,
       rex::perf::frame_stats::Stat::kShaderTranslateCpuUs);
+  rex::perf::frame_stats::ThreadUsage usage_before;
+  if (rex::perf::frame_stats::enabled()) {
+    usage_before = rex::perf::frame_stats::GetThreadUsage();
+    // Where each translating thread may run, once per thread.
+    thread_local bool thread_logged = false;
+    if (!thread_logged) {
+      thread_logged = true;
+      rex::thread::Thread* thread = rex::thread::Thread::GetCurrentThread();
+      if (thread) {
+        REXGPU_INFO("frame_stats: translating shaders on thread \"{}\", affinity mask {:X}",
+                    thread->name(), thread->affinity_mask());
+      }
+    }
+  }
+  struct UsageAdder {
+    const rex::perf::frame_stats::ThreadUsage& before;
+    ~UsageAdder() {
+      if (!rex::perf::frame_stats::enabled()) {
+        return;
+      }
+      rex::perf::frame_stats::ThreadUsage after = rex::perf::frame_stats::GetThreadUsage();
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslateSysUs,
+                                  after.sys_us - before.sys_us);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslateFaults,
+                                  after.faults - before.faults);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslatePreempts,
+                                  after.preempts - before.preempts);
+    }
+  } usage_adder{usage_before};
   if (!translator.TranslateAnalyzedShader(translation)) {
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;

@@ -31,6 +31,9 @@ enum class Stat : uint32_t {
   kCpTranslateUs,         // command processor translating shaders itself
   kShaderModuleUs,        // vkCreateShaderModule, part of kShaderTranslateUs
   kShaderModuleCpuUs,
+  kShaderTranslateSysUs,  // kernel part of kShaderTranslateCpuUs (getrusage)
+  kShaderTranslateFaults,
+  kShaderTranslatePreempts,  // involuntary context switches
   kTextureLoads,
   kTextureLoadUs,
   kFileReads,
@@ -48,6 +51,15 @@ void Add(Stat stat, uint64_t value);
 uint64_t NowUs();
 // CPU time used by the calling thread.
 uint64_t ThreadCpuUs();
+
+// The calling thread's resource usage, where getrusage(RUSAGE_THREAD) exists;
+// zeros elsewhere.
+struct ThreadUsage {
+  uint64_t sys_us = 0;
+  uint64_t faults = 0;
+  uint64_t preempts = 0;
+};
+ThreadUsage GetThreadUsage();
 
 // Called by VdSwap on the guest thread; logs once a second and for each slow
 // frame.
