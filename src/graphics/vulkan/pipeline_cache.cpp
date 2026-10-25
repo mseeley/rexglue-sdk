@@ -1283,6 +1283,7 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
   // per shader, to compare the cost of each shader type and size.
   struct TypeAdder {
     const VulkanShader& shader;
+    uint64_t modification;
     uint64_t start = rex::perf::frame_stats::enabled() ? rex::perf::frame_stats::NowUs() : 0;
     uint64_t cpu_start = start ? rex::perf::frame_stats::ThreadCpuUs() : 0;
     ~TypeAdder() {
@@ -1299,12 +1300,13 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
                                     cpu_us);
       }
       if (rex::perf::frame_stats::log_shader_origins()) {
-        REXGPU_INFO("shader_origins: translated {:016X} {} {} dwords {} us cpu {} us",
+        REXGPU_INFO("shader_origins: translated {:016X} {} {} dwords modification {:016X} {} us "
+                    "cpu {} us",
                     shader.ucode_data_hash(), is_pixel ? "pixel" : "vertex",
-                    shader.ucode_dword_count(), us, cpu_us);
+                    shader.ucode_dword_count(), modification, us, cpu_us);
       }
     }
-  } type_adder{shader};
+  } type_adder{shader, translation.modification()};
   if (!translator.TranslateAnalyzedShader(translation)) {
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;
