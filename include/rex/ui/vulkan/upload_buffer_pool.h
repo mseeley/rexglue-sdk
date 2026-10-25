@@ -19,8 +19,11 @@ namespace vulkan {
 
 class VulkanUploadBufferPool : public GraphicsUploadBufferPool {
  public:
+  // buffer_tail: bytes each page's buffer has after the page, never handed
+  // out, so that a binding with a fixed range (such as a dynamic uniform
+  // buffer descriptor) starting anywhere in the page stays within the buffer.
   VulkanUploadBufferPool(const VulkanDevice* vulkan_device, VkBufferUsageFlags usage,
-                         size_t page_size = kDefaultPageSize);
+                         size_t page_size = kDefaultPageSize, size_t buffer_tail = 0);
 
   uint8_t* Request(uint64_t submission_index, size_t size, size_t alignment, VkBuffer& buffer_out,
                    VkDeviceSize& offset_out);
@@ -53,6 +56,7 @@ class VulkanUploadBufferPool : public GraphicsUploadBufferPool {
   uint32_t memory_type_ = UINT32_MAX;
 
   VkBufferUsageFlags usage_;
+  size_t buffer_tail_;
 };
 
 }  // namespace vulkan
