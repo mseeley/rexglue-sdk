@@ -733,6 +733,20 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint64_t scratch_buffer_last_usage_submission_ = 0;
   bool scratch_buffer_used_ = false;
 
+  // log_frame_stats GPU time: a timestamp before and after each submission's
+  // commands, read once the submission's fence has signalled. The pool is
+  // created the first time a submission is made with log_frame_stats on.
+  static constexpr uint32_t kGpuTimestampSlots = 256;
+  bool EnsureGpuTimestampQueryPool();
+  void ReadGpuTimestamps();
+  VkQueryPool gpu_timestamp_query_pool_ = VK_NULL_HANDLE;
+  bool gpu_timestamps_unsupported_ = false;
+  double gpu_timestamp_period_ns_ = 0.0;
+  uint64_t gpu_timestamp_mask_ = 0;
+  uint32_t gpu_timestamp_next_slot_ = 0;
+  // The submission and slot of each timestamped submission not yet read.
+  std::deque<std::pair<uint64_t, uint32_t>> gpu_timestamps_pending_;
+
   static constexpr uint32_t kMaxOcclusionQueries = 8192;
   VkQueryPool occlusion_query_pool_ = VK_NULL_HANDLE;
   VkBuffer occlusion_query_readback_buffer_ = VK_NULL_HANDLE;

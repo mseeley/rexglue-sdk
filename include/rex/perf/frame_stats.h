@@ -47,6 +47,9 @@ enum class Stat : uint32_t {
   kAccessFaultUs,
   kXmaDrained,  // XMA context kicked with its output ring already empty
   kXmaStarved,  // ... and no valid input buffer to decode either
+  kGuestSwapThreadCpuUs,  // CPU time of the thread calling VdSwap, between its swaps
+  kGpuBusyUs,             // GPU time of command processor submissions (timestamps)
+  kGpuSubmissions,        // submissions whose GPU time was read
   kCount
 };
 

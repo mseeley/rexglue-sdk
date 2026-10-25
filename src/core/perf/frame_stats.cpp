@@ -16,6 +16,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -62,7 +63,8 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       "cpu {:.1f} ms, cp {:.1f} ms, module {:.1f} ms cpu {:.1f} ms, sys {:.1f} ms, "
       "faults {}, preempts {}, blocks {}; pixel {} ({:.1f} ms, cpu {:.1f} ms)) | "
       "textures {} ({:.1f} ms) | files {} {:.2f} MB ({:.1f} ms) | faults {} ({:.1f} ms) | xma "
-      "drained {} starved {}",
+      "drained {} starved {} | guest swap thread cpu {:.1f} ms | gpu {:.1f} ms ({} "
+      "submissions)",
       d(Stat::kCpSwaps), ms(Stat::kCpIdleUs), ms(Stat::kCpWaitUs), d(Stat::kFenceWaits),
       ms(Stat::kFenceWaitUs), d(Stat::kDraws), d(Stat::kPipelinesCreated),
       ms(Stat::kPipelineCreateUs), ms(Stat::kPipelineCreateCpuUs), ms(Stat::kPipelineBlockUs),
@@ -74,7 +76,8 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       ms(Stat::kPixelShaderTranslateCpuUs), d(Stat::kTextureLoads),
       ms(Stat::kTextureLoadUs), d(Stat::kFileReads),
       double(d(Stat::kFileReadBytes)) / (1024.0 * 1024.0), ms(Stat::kFileReadUs),
-      d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained), d(Stat::kXmaStarved));
+      d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained), d(Stat::kXmaStarved),
+      ms(Stat::kGuestSwapThreadCpuUs), ms(Stat::kGpuBusyUs), d(Stat::kGpuSubmissions));
 }
 
 }  // namespace
@@ -151,6 +154,16 @@ void OnGuestSwap() {
   static uint64_t worst_us = 0;
 
   std::lock_guard<std::mutex> lock(mutex);
+  // The swapping thread's CPU time since its previous swap: the game's frame
+  // work, without the time it waited (for a vblank, the GPU or ring space).
+  static std::thread::id swap_thread;
+  static uint64_t swap_thread_cpu_us = 0;
+  uint64_t cpu_us = ThreadCpuUs();
+  if (swap_thread == std::this_thread::get_id()) {
+    Add(Stat::kGuestSwapThreadCpuUs, cpu_us - swap_thread_cpu_us);
+  }
+  swap_thread = std::this_thread::get_id();
+  swap_thread_cpu_us = cpu_us;
   uint64_t now_us = NowUs();
   Totals totals = Snapshot();
   if (!last_swap_us) {
