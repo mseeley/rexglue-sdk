@@ -8,6 +8,7 @@
 
 #include <rex/perf/frame_stats.h>
 
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
@@ -27,9 +28,23 @@
 
 #include <fmt/format.h>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#define REX_FRAME_STATS_TSC 1
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+#else
+#define REX_FRAME_STATS_TSC 0
+#endif
+
 REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
                     "Log frame rate, GPU waits, pipeline, texture and file activity once a "
                     "second, and every frame slower than log_frame_stats_slow_ms");
+REXCVAR_DEFINE_BOOL(log_frame_stats_draw_parts, false, "Perf",
+                    "With log_frame_stats, also time the parts of each draw on the command "
+                    "processor (eight timer reads a draw)");
 REXCVAR_DEFINE_INT32(log_frame_stats_slow_ms, 100, "Perf",
                      "Frames slower than this get their own log_frame_stats line");
 
@@ -64,9 +79,9 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       "faults {}, preempts {}, blocks {}; pixel {} ({:.1f} ms, cpu {:.1f} ms)) | "
       "textures {} ({:.1f} ms) | files {} {:.2f} MB ({:.1f} ms) | faults {} ({:.1f} ms) | xma "
       "drained {} starved {} | guest swap thread cpu {:.1f} ms | gpu {:.1f} ms ({} "
-      "submissions) | cp cpu {:.1f} ms | draw setup {:.1f} textures {:.1f} rts {:.1f} "
-      "pipeline {:.1f} state {:.1f} memory {:.1f} record {:.1f} ms | replay {:.1f} submit "
-      "{:.1f} output {:.1f} ms",
+      "submissions) | cp cpu {:.1f} ms, packets {}, registers {} + {} in blocks | draw setup "
+      "{:.1f} textures {:.1f} rts {:.1f} pipeline configure {:.1f} bind {:.1f} state {:.1f} "
+      "memory {:.1f} record {:.1f} ms | replay {:.1f} submit {:.1f} output {:.1f} ms",
       d(Stat::kCpSwaps), ms(Stat::kCpIdleUs), ms(Stat::kCpWaitUs), d(Stat::kFenceWaits),
       ms(Stat::kFenceWaitUs), d(Stat::kDraws), d(Stat::kPipelinesCreated),
       ms(Stat::kPipelineCreateUs), ms(Stat::kPipelineCreateCpuUs), ms(Stat::kPipelineBlockUs),
@@ -80,8 +95,10 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       double(d(Stat::kFileReadBytes)) / (1024.0 * 1024.0), ms(Stat::kFileReadUs),
       d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained), d(Stat::kXmaStarved),
       ms(Stat::kGuestSwapThreadCpuUs), ms(Stat::kGpuBusyUs), d(Stat::kGpuSubmissions),
-      ms(Stat::kCpCpuUs), ms(Stat::kCpDrawSetupUs), ms(Stat::kCpDrawTexturesUs),
-      ms(Stat::kCpDrawRenderTargetsUs), ms(Stat::kCpDrawPipelineUs), ms(Stat::kCpDrawStateUs),
+      ms(Stat::kCpCpuUs), d(Stat::kCpPackets), d(Stat::kCpRegisterWrites),
+      d(Stat::kCpBulkRegisterWrites), ms(Stat::kCpDrawSetupUs), ms(Stat::kCpDrawTexturesUs),
+      ms(Stat::kCpDrawRenderTargetsUs), ms(Stat::kCpDrawPipelineConfigureUs),
+      ms(Stat::kCpDrawPipelineUs), ms(Stat::kCpDrawStateUs),
       ms(Stat::kCpDrawMemoryUs), ms(Stat::kCpDrawRecordUs), ms(Stat::kCpReplayUs),
       ms(Stat::kCpQueueSubmitUs), ms(Stat::kCpOutputUs));
 }
@@ -90,6 +107,10 @@ std::string FormatStats(const Totals& now, const Totals& before) {
 
 bool enabled() {
   return REXCVAR_GET(log_frame_stats);
+}
+
+bool draw_parts() {
+  return REXCVAR_GET(log_frame_stats) && REXCVAR_GET(log_frame_stats_draw_parts);
 }
 
 bool log_shader_origins() {
@@ -105,12 +126,78 @@ void Add(Stat stat, uint64_t value) {
   g_totals[size_t(stat)].fetch_add(value, std::memory_order_relaxed);
 }
 
+namespace {
+
+uint64_t SteadyNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+#if REX_FRAME_STATS_TSC
+// The timers read the time stamp counter: a few nanoseconds, where
+// steady_clock can be a system call (about 0.75 us on the PS5, PS5 run 3).
+// Calibrated against steady_clock over 20 ms the first time.
+struct TscScale {
+  uint64_t base_tsc;
+  double us_per_tick;
+};
+
+const TscScale& GetTscScale() {
+  static const TscScale scale = [] {
+    uint64_t start_ns = SteadyNs();
+    uint64_t start_tsc = __rdtsc();
+    uint64_t end_ns;
+    do {
+      end_ns = SteadyNs();
+    } while (end_ns - start_ns < 20000000);
+    uint64_t end_tsc = __rdtsc();
+    return TscScale{start_tsc, double(end_ns - start_ns) / 1000.0 / double(end_tsc - start_tsc)};
+  }();
+  return scale;
+}
+#endif
+
+// Keeps the timed reads in LogClockCosts from being optimised away.
+std::atomic<uint64_t> g_clock_cost_sink{0};
+
+// Once, the first time the stats are on: what a timer read costs.
+void LogClockCosts() {
+  constexpr int kReads = 1000;
+  uint64_t sink = 0;
+  auto per_read_ns = [&](auto read) {
+    uint64_t start = SteadyNs();
+    for (int i = 0; i < kReads; ++i) {
+      sink += read();
+    }
+    double ns = double(SteadyNs() - start) / kReads;
+    g_clock_cost_sink.fetch_add(sink, std::memory_order_relaxed);
+    return ns;
+  };
+  double steady_ns = per_read_ns([] { return SteadyNs(); });
+  double now_us_ns = per_read_ns([] { return NowUs(); });
+  double host_tick_ns = per_read_ns([] { return rex::chrono::Clock::QueryHostTickCount(); });
+#if REX_FRAME_STATS_TSC
+  double tsc_mhz = 1.0 / GetTscScale().us_per_tick;
+#else
+  double tsc_mhz = 0.0;
+#endif
+  REXLOG_INFO(
+      "frame_stats: timer read costs: steady_clock {:.0f} ns, frame_stats timer {:.0f} ns "
+      "(TSC {:.0f} MHz, 0 when not used), Clock::QueryHostTickCount {:.0f} ns",
+      steady_ns, now_us_ns, tsc_mhz, host_tick_ns);
+}
+
+}  // namespace
+
 uint64_t NowUs() {
   // Never 0, which ScopedTimer uses for "not timing".
-  return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch())
-                      .count()) +
-         1;
+#if REX_FRAME_STATS_TSC
+  const TscScale& scale = GetTscScale();
+  return uint64_t(double(__rdtsc() - scale.base_tsc) * scale.us_per_tick) + 1;
+#else
+  return SteadyNs() / 1000 + 1;
+#endif
 }
 
 uint64_t ThreadCpuUs() {
@@ -151,6 +238,8 @@ void OnGuestSwap() {
   if (!enabled()) {
     return;
   }
+  static std::once_flag clock_costs_logged;
+  std::call_once(clock_costs_logged, LogClockCosts);
   static std::mutex mutex;
   static uint64_t last_swap_us = 0;
   static uint64_t window_start_us = 0;

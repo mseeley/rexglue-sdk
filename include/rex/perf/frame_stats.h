@@ -56,17 +56,23 @@ enum class Stat : uint32_t {
   kCpDrawSetupUs,         // submission, primitive processing, shaders, samplers
   kCpDrawTexturesUs,      // texture cache RequestTextures
   kCpDrawRenderTargetsUs, // render target cache Update
-  kCpDrawPipelineUs,      // pipeline configuration and binding
+  kCpDrawPipelineConfigureUs,  // pipeline cache ConfigurePipeline
+  kCpDrawPipelineUs,           // pipeline lookup by handle and binding
   kCpDrawStateUs,         // dynamic state, system constants, descriptor bindings
   kCpDrawMemoryUs,        // vertex buffer and memexport ranges in shared memory
   kCpDrawRecordUs,        // barriers, render pass, the draw command
   kCpReplayUs,            // deferred command buffer into the Vulkan one
   kCpQueueSubmitUs,       // vkQueueSubmit
   kCpOutputUs,            // presenter RefreshGuestOutput, including the frame's last submission
+  kCpPackets,             // PM4 packets executed
+  kCpRegisterWrites,      // registers written one at a time (WriteRegister)
+  kCpBulkRegisterWrites,  // registers written as a block (WriteRegistersFromMem)
   kCount
 };
 
 bool enabled();
+// log_frame_stats_draw_parts: time the parts of each draw as well.
+bool draw_parts();
 // log_shader_origins: physical allocations with their guest callers, file
 // reads into guest memory, and each shader's first IM_LOAD - to find where and
 // when the game creates its shaders, ahead of their first draw.
@@ -100,11 +106,11 @@ ThreadUsage GetThreadUsage();
 void OnGuestSwap();
 
 // Times consecutive parts of one function: each Lap adds the time since the
-// previous Lap (or construction) to a stat. Costs a cvar read while
-// log_frame_stats is off.
+// previous Lap (or construction) to a stat. Inactive when constructed with
+// false (by default, while log_frame_stats is off).
 class LapTimer {
  public:
-  LapTimer() : last_(enabled() ? NowUs() : 0) {}
+  explicit LapTimer(bool active = enabled()) : last_(active ? NowUs() : 0) {}
   void Lap(Stat stat) {
     if (!last_) {
       return;

@@ -2192,6 +2192,7 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
   if (!num_registers) {
     return;
   }
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpBulkRegisterWrites, num_registers);
   uint32_t end_index = start_index + num_registers - 1;
 
   auto range_has_any_constant_usage = [](const uint64_t* usage_map, uint32_t first_constant,
@@ -3670,7 +3671,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
   rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kDraws, 1);
-  rex::perf::frame_stats::LapTimer draw_laps;
+  rex::perf::frame_stats::LapTimer draw_laps(rex::perf::frame_stats::draw_parts());
 
   const RegisterFile& regs = *register_file_;
   (void)index_buffer_info;
@@ -3957,6 +3958,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                           pipeline, pipeline_layout_provider, &pipeline_handle)) {
     return draw_fail("configure_pipeline");
   }
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawPipelineConfigureUs);
   bool pipeline_is_placeholder = false;
   // Reload the current handle state to observe async hot-swap completions that
   // may happen between pipeline configuration and binding.

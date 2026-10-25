@@ -353,6 +353,7 @@ uint32_t CommandProcessor::ReadRegisterValue(uint32_t index) const {
 }
 
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpRegisterWrites, 1);
   RegisterFile& regs = *register_file_;
   if (index >= RegisterFile::kRegisterCount) {
     auto [it, inserted] = extended_register_values_.insert_or_assign(index, value);
@@ -675,6 +676,7 @@ void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
 }
 
 bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpPackets, 1);
   const uint32_t packet = reader->ReadAndSwap<uint32_t>();
   const uint32_t packet_type = packet >> 30;
   if (packet == 0) {
