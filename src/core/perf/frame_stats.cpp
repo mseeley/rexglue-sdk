@@ -11,6 +11,7 @@
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/thread.h>
 
 #include <algorithm>
 #include <array>
@@ -65,6 +66,11 @@ REXCVAR_DEFINE_INT32(log_frame_stats_slow_ms, 100, "Perf",
 REXCVAR_DEFINE_BOOL(log_frame_stats_threads, false, "Perf",
                     "With log_frame_stats, also log every thread's CPU time, context switches, "
                     "last processor and affinity once a second (FreeBSD and Linux)");
+
+REXCVAR_DEFINE_BOOL(log_frame_stats_swap_waits, false, "Perf",
+                    "With log_frame_stats, also log the swap thread's guest kernel waits by "
+                    "guest caller and object, and which threads signalled those objects, once "
+                    "a second");
 
 REXCVAR_DEFINE_BOOL(log_shader_origins, false, "Perf",
                     "Log physical allocations with their guest callers, file reads into guest "
@@ -384,6 +390,92 @@ bool log_shader_origins() {
   return REXCVAR_GET(log_shader_origins);
 }
 
+bool swap_waits() {
+  return REXCVAR_GET(log_frame_stats) && REXCVAR_GET(log_frame_stats_swap_waits);
+}
+
+bool WantWaitTarget() {
+  return swap_waits() && IsGuestSwapThread();
+}
+
+namespace {
+
+// log_frame_stats_swap_waits. The tallies are only touched on the swap
+// thread (its waits, and OnGuestSwap, which logs them); signals come from any
+// thread.
+struct WaitTally {
+  WaitTarget target;
+  uint64_t waits = 0;
+  uint64_t us = 0;
+};
+std::map<std::pair<uint32_t, const void*>, WaitTally> g_wait_tallies;
+std::mutex g_signals_mutex;
+std::map<const void*, std::map<std::string, uint64_t>> g_signals;
+
+std::string CurrentThreadName() {
+  rex::thread::Thread* thread = rex::thread::Thread::GetCurrentThread();
+  if (thread && !thread->name().empty()) {
+    return thread->name();
+  }
+  return fmt::format("thread {}", rex::thread::current_thread_system_id());
+}
+
+// One line: the swap thread's waits of the last second by caller and object,
+// the most time first, each with the threads that signalled its object.
+void LogSwapWaits() {
+  std::vector<const WaitTally*> tallies;
+  for (const auto& [key, tally] : g_wait_tallies) {
+    tallies.push_back(&tally);
+  }
+  std::sort(tallies.begin(), tallies.end(),
+            [](const WaitTally* a, const WaitTally* b) { return a->us > b->us; });
+  std::map<const void*, std::map<std::string, uint64_t>> signals;
+  {
+    std::lock_guard<std::mutex> lock(g_signals_mutex);
+    signals.swap(g_signals);
+  }
+  std::string line;
+  for (size_t i = 0; i < tallies.size() && i < 6; ++i) {
+    const WaitTally& tally = *tallies[i];
+    const WaitTarget& target = tally.target;
+    line += fmt::format(" | {:08X} < {:08X} on {} {:08X} handle {:08X}{}: {} waits {:.1f} ms, "
+                        "signalled by",
+                        target.caller, target.caller2, target.type, target.guest_object, target.handle,
+                        target.count > 1 ? fmt::format(" (first of {})", target.count) : "",
+                        tally.waits, double(tally.us) / 1000.0);
+    auto it = signals.find(target.object);
+    if (it == signals.end()) {
+      line += " none";
+      continue;
+    }
+    std::vector<std::pair<uint64_t, std::string>> by_count;
+    for (const auto& [name, count] : it->second) {
+      by_count.emplace_back(count, name);
+    }
+    std::sort(by_count.rbegin(), by_count.rend());
+    for (size_t j = 0; j < by_count.size() && j < 3; ++j) {
+      line += fmt::format("{} \"{}\" {}", j ? "," : "", by_count[j].second, by_count[j].first);
+    }
+  }
+  REXLOG_INFO("frame_stats: swap waits: {} targets{}", g_wait_tallies.size(), line);
+  g_wait_tallies.clear();
+}
+
+}  // namespace
+
+void SwapThreadWait::NoteSwapThreadWait(const WaitTarget& target, uint64_t us) {
+  WaitTally& tally = g_wait_tallies[{target.caller, target.object}];
+  tally.target = target;
+  ++tally.waits;
+  tally.us += us;
+}
+
+void NoteSignalSlow(const void* object) {
+  std::string name = CurrentThreadName();
+  std::lock_guard<std::mutex> lock(g_signals_mutex);
+  ++g_signals[object][name];
+}
+
 WriteFault& CurrentWriteFault() {
   thread_local WriteFault write_fault;
   return write_fault;
@@ -562,6 +654,9 @@ void OnGuestSwap() {
       double(worst_us) / 1000.0, FormatStats(totals, window_totals));
   if (REXCVAR_GET(log_frame_stats_threads)) {
     LogThreads();
+  }
+  if (swap_waits()) {
+    LogSwapWaits();
   }
   window_start_us = now_us;
   window_totals = totals;

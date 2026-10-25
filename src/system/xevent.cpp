@@ -10,6 +10,7 @@
  */
 
 #include <rex/logging.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/stream.h>
 #include <rex/system/xevent.h>
 
@@ -74,11 +75,13 @@ void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
 }
 
 int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
+  rex::perf::frame_stats::NoteSignal(this);
   event_->Set();
   return 1;
 }
 
 int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
+  rex::perf::frame_stats::NoteSignal(this);
   event_->Pulse();
   return 1;
 }

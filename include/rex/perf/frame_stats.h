@@ -119,8 +119,42 @@ void OnGuestSwap();
 // Whether this is the thread that last called VdSwap.
 bool IsGuestSwapThread();
 
+// log_frame_stats_swap_waits: with log_frame_stats, the swap thread's guest
+// kernel waits by guest caller and object, and the threads that signal those
+// objects, once a second.
+bool swap_waits();
+
+// What a guest kernel wait waits on, for log_frame_stats_swap_waits: the
+// guest return address of the wait call and its caller's, the first object (the host
+// XObject, any type, as a key), its guest address and handle, its type, and
+// how many objects the wait names.
+struct WaitTarget {
+  uint32_t caller = 0;
+  uint32_t caller2 = 0;
+  const void* object = nullptr;
+  uint32_t guest_object = 0;
+  uint32_t handle = 0;
+  const char* type = "";
+  uint32_t count = 1;
+};
+
+// Whether a wait on this thread is counted per target: the stats and the
+// swap waits are on, and this is the swap thread. The kernel fills a
+// WaitTarget only then.
+bool WantWaitTarget();
+
+// A kernel object was signalled (event set or pulsed, semaphore or mutant
+// released) by the calling thread. Cheap while log_frame_stats_swap_waits is
+// off.
+void NoteSignalSlow(const void* object);
+inline void NoteSignal(const void* object) {
+  if (swap_waits()) {
+    NoteSignalSlow(object);
+  }
+}
+
 // Adds the time of a guest kernel wait or delay to the swap thread's stats,
-// when on that thread.
+// when on that thread; with a WaitTarget, to its per-target tally as well.
 class SwapThreadWait {
  public:
   explicit SwapThreadWait(bool delay)
@@ -135,14 +169,22 @@ class SwapThreadWait {
     } else {
       Add(Stat::kGuestSwapThreadWaitUs, us);
       Add(Stat::kGuestSwapThreadWaits, 1);
+      if (target_.object) {
+        NoteSwapThreadWait(target_, us);
+      }
     }
   }
   SwapThreadWait(const SwapThreadWait&) = delete;
   SwapThreadWait& operator=(const SwapThreadWait&) = delete;
 
+  // What the wait is on, when WantWaitTarget().
+  void set_target(const WaitTarget& target) { target_ = target; }
+
  private:
+  static void NoteSwapThreadWait(const WaitTarget& target, uint64_t us);
   bool delay_;
   uint64_t start_;
+  WaitTarget target_;
 };
 
 // Times consecutive parts of one function: each Lap adds the time since the
