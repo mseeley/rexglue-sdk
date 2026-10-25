@@ -342,6 +342,7 @@ void RenderTargetCache::InitializeCommon() {
 
 void RenderTargetCache::DestroyAllRenderTargets(bool shutting_down) {
   ownership_ranges_.clear();
+  host_depth_exported_to_color_.fill(RenderTargetKey());
   if (!shutting_down) {
     ownership_ranges_.emplace(std::piecewise_construct, std::forward_as_tuple(uint32_t(0)),
                               std::forward_as_tuple(xenos::kEdramTileCount, RenderTargetKey(),
@@ -1252,6 +1253,8 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
   bool dest_is_64bpp = dest.Is64bpp();
   bool host_depth_encoding_different = dest.is_depth && GetPath() == Path::kHostRenderTargets &&
                                        IsHostDepthEncodingDifferent(dest.GetDepthFormat());
+  // Appended after all the regular transfers, which they refine.
+  host_depth_relocated_transfers_.clear();
   auto change_ownership_in_extent = [&](uint32_t extent_start, uint32_t extent_end) {
     // The map contains consecutive ranges, merged if the adjacent ones are the
     // same. Find the range starting at >= the start. A portion of the range
@@ -1295,6 +1298,17 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
         // just the latest host depth owner - the transfer source is expected to
         // be different than the destination.
         if (!transfer_source.IsEmpty() && transfer_source != dest) {
+          if (!dest.is_depth && transfer_source.is_depth &&
+              GetPath() == Path::kHostRenderTargets &&
+              IsHostDepthEncodingDifferent(transfer_source.GetDepthFormat())) {
+            // The guest depth may now be copied elsewhere through color.
+            auto exported_end =
+                std::find(host_depth_exported_to_color_.begin(),
+                          std::prev(host_depth_exported_to_color_.end()), transfer_source);
+            std::move_backward(host_depth_exported_to_color_.begin(), exported_end,
+                               std::next(exported_end));
+            host_depth_exported_to_color_.front() = transfer_source;
+          }
           uint32_t transfer_end_tiles = std::min(it->second.end_tiles, extent_end);
           if (!resolve_clear_cutout ||
               Transfer::GetRangeRectangles(it->first, transfer_end_tiles, dest.base_tiles,
@@ -1309,6 +1323,7 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
               transfer_host_depth_source = RenderTargetKey();
             }
             if (!transfers_append_out->empty() &&
+                !transfers_append_out->back().host_depth_relocated &&
                 transfers_append_out->back().end_tiles == it->first &&
                 transfers_append_out->back().source->key() == transfer_source &&
                 ((transfers_append_out->back().host_depth_source == nullptr) ==
@@ -1336,6 +1351,27 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
                       transfer_host_depth_source_rt_it != render_targets_.end()
                           ? transfer_host_depth_source_rt_it->second
                           : nullptr);
+                }
+              }
+            }
+            if (host_depth_encoding_different && !transfer_source.is_depth &&
+                IsHostDepthRelocationSupported()) {
+              RenderTarget* relocated_source =
+                  GetHostDepthRelocationSource(dest, transfer_host_depth_source);
+              if (relocated_source) {
+                if (!host_depth_relocated_transfers_.empty() &&
+                    host_depth_relocated_transfers_.back().end_tiles == it->first &&
+                    host_depth_relocated_transfers_.back().source->key() == transfer_source &&
+                    host_depth_relocated_transfers_.back().host_depth_source ==
+                        relocated_source) {
+                  host_depth_relocated_transfers_.back().end_tiles = transfer_end_tiles;
+                } else {
+                  auto transfer_source_rt_it = render_targets_.find(transfer_source);
+                  if (transfer_source_rt_it != render_targets_.end()) {
+                    host_depth_relocated_transfers_.emplace_back(
+                        it->first, transfer_end_tiles, transfer_source_rt_it->second,
+                        relocated_source, true);
+                  }
                 }
               }
             }
@@ -1383,6 +1419,31 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
     // The ownership change extent goes to the next EDRAM addressing period.
     change_ownership_in_extent(0, std::min(end_tiles & (xenos::kEdramTileCount - 1), start_tiles));
   }
+  if (transfers_append_out) {
+    transfers_append_out->insert(transfers_append_out->end(),
+                                 host_depth_relocated_transfers_.cbegin(),
+                                 host_depth_relocated_transfers_.cend());
+  }
+}
+
+RenderTargetCache::RenderTarget* RenderTargetCache::GetHostDepthRelocationSource(
+    RenderTargetKey dest, RenderTargetKey host_depth_source) const {
+  // Only a render target with the same layout, since the data is assumed to be
+  // at the same position relative to the base. Not the destination itself or
+  // the regular host depth source, which are used without relocation.
+  for (RenderTargetKey exported : host_depth_exported_to_color_) {
+    if (exported.IsEmpty() || exported == dest || exported == host_depth_source ||
+        exported.resource_format != dest.resource_format ||
+        exported.pitch_tiles_at_32bpp != dest.pitch_tiles_at_32bpp ||
+        exported.msaa_samples != dest.msaa_samples) {
+      continue;
+    }
+    auto exported_rt_it = render_targets_.find(exported);
+    if (exported_rt_it != render_targets_.end() && exported_rt_it->second) {
+      return exported_rt_it->second;
+    }
+  }
+  return nullptr;
 }
 
 }  // namespace rex::graphics

@@ -4155,6 +4155,16 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
             depth24_to_depth32_header = builder.getBuildPoint();
             spv::Id host_depth_outdated =
                 builder.createBinOp(spv::OpINotEqual, type_bool, guest_depth24, host_depth24);
+            if (key.host_depth_only) {
+              // Refining the regular transfer - keep what it has written where
+              // the host depth is outdated.
+              SpirvBuilder::IfBuilder host_depth_outdated_kill_if(
+                  host_depth_outdated, spv::SelectionControlMaskNone, builder);
+              builder.createNoResultOp(spv::OpKill);
+              // OpKill terminates the block.
+              host_depth_outdated_kill_if.makeEndIf(false);
+              depth24_to_depth32_header = builder.getBuildPoint();
+            }
             spv::Block& depth24_to_depth32_convert_entry = builder.makeNewBlock();
             {
               spv::Block& depth24_to_depth32_merge_block = builder.makeNewBlock();
@@ -4877,6 +4887,10 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
           source_vulkan_rt.SetTemporarySortIndex(UINT32_MAX);
         }
         for (const Transfer& transfer : current_transfers) {
+          if (j && transfer.host_depth_relocated) {
+            // Only refines the depth written by the regular transfer.
+            continue;
+          }
           assert_not_null(transfer.source);
           auto& source_vulkan_rt = *static_cast<VulkanRenderTarget*>(transfer.source);
           VulkanRenderTarget* host_depth_source_vulkan_rt =
@@ -4897,6 +4911,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
               (host_depth_source_vulkan_rt && !host_depth_source_is_copy)
                   ? host_depth_source_vulkan_rt->key().msaa_samples
                   : xenos::MsaaSamples::k1X;
+          new_transfer_shader_key.host_depth_only = !j && transfer.host_depth_relocated;
           if (j) {
             new_transfer_shader_key.mode = source_rt_key.is_depth
                                                ? TransferMode::kDepthToStencilBit
@@ -5180,8 +5195,12 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
           TransferAddressConstant host_depth_address_constant;
           host_depth_address_constant.dest_pitch = dest_pitch_tiles;
           host_depth_address_constant.source_pitch = host_depth_source_rt_key.GetPitchTiles();
+          // A relocated host depth source is read at the same position
+          // relative to its base.
           host_depth_address_constant.source_to_dest =
-              int32_t(dest_rt_key.base_tiles) - int32_t(host_depth_source_rt_key.base_tiles);
+              it->transfer.host_depth_relocated
+                  ? 0
+                  : int32_t(dest_rt_key.base_tiles) - int32_t(host_depth_source_rt_key.base_tiles);
           if (last_host_depth_address_constant != host_depth_address_constant) {
             last_host_depth_address_constant = host_depth_address_constant;
             transfer_push_constants_set &= ~kTransferUsedPushConstantDwordHostDepthAddressBit;

@@ -171,6 +171,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
 
   bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const override;
+  bool IsHostDepthRelocationSupported() const override { return true; }
 
   bool IsGammaFormatHostStorageSeparate() const override;
 
@@ -536,6 +537,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       // additional stencil texture.
       static_assert(size_t(TransferMode::kCount) <= (size_t(1) << 4));
       TransferMode mode : 4;
+
+      // For Transfer::host_depth_relocated: write the host depth only where it
+      // matches the guest value, discarding the sample otherwise. The highest
+      // bit so these are sorted after the regular transfers they refine.
+      uint32_t host_depth_only : 1;
     };
 
     TransferShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
