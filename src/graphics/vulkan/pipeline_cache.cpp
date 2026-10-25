@@ -3670,7 +3670,12 @@ void VulkanPipelineCache::StorageWriteThread() {
         flush_pipelines = true;
       }
       if (!shader && !write_pipeline) {
-        storage_write_request_cond_.wait(lock);
+        // Flush at the top of the loop first. Waiting here would hold the
+        // last written shaders and pipelines in the stdio buffer until the
+        // next request, which never comes if the process is killed.
+        if (!flush_shaders && !flush_pipelines) {
+          storage_write_request_cond_.wait(lock);
+        }
         continue;
       }
     }
