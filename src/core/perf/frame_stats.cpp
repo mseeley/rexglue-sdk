@@ -85,6 +85,11 @@ bool log_shader_origins() {
   return REXCVAR_GET(log_shader_origins);
 }
 
+WriteFault& CurrentWriteFault() {
+  thread_local WriteFault write_fault;
+  return write_fault;
+}
+
 void Add(Stat stat, uint64_t value) {
   g_totals[size_t(stat)].fetch_add(value, std::memory_order_relaxed);
 }

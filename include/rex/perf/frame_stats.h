@@ -52,6 +52,15 @@ bool enabled();
 // reads into guest memory, and each shader's first IM_LOAD - to find where and
 // when the game creates its shaders, ahead of their first draw.
 bool log_shader_origins();
+
+// The write fault the calling thread is handling while it runs the memory
+// watch callbacks: the host instruction and the host address written. Zero
+// when a callback runs for another reason, such as a file read.
+struct WriteFault {
+  uintptr_t pc = 0;
+  uintptr_t host_address = 0;
+};
+WriteFault& CurrentWriteFault();
 void Add(Stat stat, uint64_t value);
 uint64_t NowUs();
 // CPU time used by the calling thread.

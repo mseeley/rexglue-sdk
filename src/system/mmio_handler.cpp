@@ -14,6 +14,7 @@
 #include <utility>
 
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/exception_handler.h>
 #include <rex/logging.h>
 #include <rex/memory.h>
@@ -417,8 +418,12 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
     if (access_violation_callback_) {
-      return access_violation_callback_(std::move(lock), access_violation_callback_context_,
-                                        fault_host_address, is_write);
+      auto& write_fault = rex::perf::frame_stats::CurrentWriteFault();
+      write_fault = {uintptr_t(ex->pc()), uintptr_t(ex->fault_address())};
+      bool handled = access_violation_callback_(std::move(lock), access_violation_callback_context_,
+                                                fault_host_address, is_write);
+      write_fault = {};
+      return handled;
     }
     return false;
   }

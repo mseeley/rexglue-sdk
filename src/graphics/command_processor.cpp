@@ -18,6 +18,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -36,6 +37,7 @@
 #include <rex/math.h>
 #include <rex/hash.h>
 #include <rex/memory.h>
+#include <rex/system/thread_state.h>
 #include <rex/memory/ring_buffer.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
@@ -1523,11 +1525,94 @@ bool CommandProcessor::ExecutePacketType3_SET_SHADER_CONSTANTS(memory::RingBuffe
   return true;
 }
 
+#if (REX_PLATFORM_LINUX && !REX_PLATFORM_PS5) || defined(__APPLE__)
+#include <dlfcn.h>
+#define REX_SHADER_ORIGINS_DLADDR 1
+#endif
+
 namespace {
 
 // log_shader_origins_watch: when each listed shader's microcode is complete in
-// guest memory, however it got there. Started at the first IM_LOAD, after the
-// game has set up the memory its shaders live in.
+// guest memory, and which guest code writes it there. Started at the first
+// IM_LOAD, after the game has set up the memory its shaders live in.
+struct ShaderOriginsWatched {
+  uint64_t hash;
+  uint32_t address;  // guest virtual
+  uint32_t physical;
+  uint32_t size;
+};
+std::mutex shader_origins_mutex;
+std::vector<ShaderOriginsWatched> shader_origins_pending;
+
+// The guest call stack of the current thread: its link register, then the
+// saved link registers up the back chain, through readable pages only.
+std::string GuestCallers(memory::Memory* memory) {
+  auto* thread_state = rex::runtime::ThreadState::Get();
+  if (!thread_state) {
+    return "(not a guest thread)";
+  }
+  PPCContext* ctx = thread_state->context();
+  auto readable = [memory](uint32_t address) {
+    memory::BaseHeap* heap = memory->LookupHeap(address);
+    uint32_t protect = 0;
+    return heap && heap->QueryProtect(address, &protect) && (protect & memory::kMemoryProtectRead);
+  };
+  std::string callers = fmt::format("{:08X}", uint32_t(ctx->lr));
+  uint32_t frame = ctx->r1.u32;
+  for (int i = 0; i < 8 && frame; ++i) {
+    if (!readable(frame)) {
+      break;
+    }
+    uint32_t back = memory::load_and_swap<uint32_t>(memory->TranslateVirtual(frame));
+    if (back <= frame || !readable(back - 8)) {
+      break;
+    }
+    callers +=
+        fmt::format(" {:08X}", memory::load_and_swap<uint32_t>(memory->TranslateVirtual(back - 8)));
+    frame = back;
+  }
+  return callers;
+}
+
+// Runs with the global lock held, on the thread that wrote (or read a file).
+std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t physical_start,
+                                                         uint32_t length, bool exact_range) {
+  auto* memory = static_cast<memory::Memory*>(context);
+  std::string hashes;
+  {
+    std::lock_guard<std::mutex> lock(shader_origins_mutex);
+    for (const ShaderOriginsWatched& watched : shader_origins_pending) {
+      if (watched.physical < physical_start + length &&
+          physical_start < watched.physical + watched.size) {
+        hashes += fmt::format(" {:016X}", watched.hash);
+      }
+    }
+  }
+  if (hashes.empty()) {
+    return {0, UINT32_MAX};
+  }
+  const auto& fault = rex::perf::frame_stats::CurrentWriteFault();
+  std::string writer = "no CPU write fault (a file read or another kernel path)";
+  uint32_t guest_address = 0;
+  if (fault.pc) {
+    writer = fmt::format("host pc {:X}", fault.pc);
+#ifdef REX_SHADER_ORIGINS_DLADDR
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(fault.pc), &info) && info.dli_fname) {
+      std::string_view module = info.dli_fname;
+      module = module.substr(module.find_last_of('/') + 1);
+      writer = fmt::format("{}+{:X}", module, fault.pc - uintptr_t(info.dli_fbase));
+    }
+#endif
+    guest_address = memory->HostToGuestVirtual(reinterpret_cast<void*>(fault.host_address));
+  }
+  REXGPU_INFO(
+      "shader_origins: write to {:08X} (physical pages {:08X}+{:X}) by {}, callers {}, "
+      "shaders{}",
+      guest_address, physical_start, length, writer, GuestCallers(memory), hashes);
+  return {0, UINT32_MAX};
+}
+
 void StartShaderOriginsWatch(memory::Memory* memory) {
   static std::once_flag started;
   std::call_once(started, [memory]() {
@@ -1535,37 +1620,56 @@ void StartShaderOriginsWatch(memory::Memory* memory) {
     if (path.empty()) {
       return;
     }
-    struct Watched {
-      uint64_t hash;
-      uint32_t address;
-      uint32_t dwords;
-    };
-    std::vector<Watched> watched;
     std::ifstream file(path);
     std::string hash, address, dwords;
-    while (file >> hash >> address >> dwords) {
-      watched.push_back({std::stoull(hash, nullptr, 16), uint32_t(std::stoul(address, nullptr, 16)),
-                         uint32_t(std::stoul(dwords, nullptr, 16))});
+    {
+      std::lock_guard<std::mutex> lock(shader_origins_mutex);
+      while (file >> hash >> address >> dwords) {
+        uint32_t virtual_address = uint32_t(std::stoul(address, nullptr, 16));
+        shader_origins_pending.push_back({std::stoull(hash, nullptr, 16), virtual_address,
+                                          memory->GetPhysicalAddress(virtual_address),
+                                          uint32_t(std::stoul(dwords, nullptr, 16)) * 4});
+      }
+      REXGPU_INFO("shader_origins: watching {} shaders from {}", shader_origins_pending.size(),
+                  path);
     }
-    REXGPU_INFO("shader_origins: watching {} shaders from {}", watched.size(), path);
-    std::thread([memory, watched = std::move(watched)]() mutable {
+    memory->RegisterPhysicalMemoryInvalidationCallback(ShaderOriginsWriteCallback, memory);
+    std::thread([memory]() {
       auto readable = [memory](uint32_t address) {
         memory::BaseHeap* heap = memory->LookupHeap(address);
         uint32_t protect = 0;
         return heap && heap->QueryProtect(address, &protect) &&
                (protect & memory::kMemoryProtectRead);
       };
-      while (!watched.empty()) {
-        for (auto it = watched.begin(); it != watched.end();) {
-          uint32_t size = it->dwords * 4;
-          if (readable(it->address) && readable(it->address + size - 1) &&
-              XXH3_64bits(memory->TranslateVirtual(it->address), size) == it->hash) {
-            REXGPU_INFO("shader_origins: microcode {:016X} present at {:08X}", it->hash,
-                        it->address);
-            it = watched.erase(it);
+      while (true) {
+        std::vector<ShaderOriginsWatched> pending;
+        {
+          std::lock_guard<std::mutex> lock(shader_origins_mutex);
+          pending = shader_origins_pending;
+        }
+        if (pending.empty()) {
+          break;
+        }
+        std::vector<uint64_t> present;
+        for (const ShaderOriginsWatched& watched : pending) {
+          if (readable(watched.address) && readable(watched.address + watched.size - 1) &&
+              XXH3_64bits(memory->TranslateVirtual(watched.address), watched.size) ==
+                  watched.hash) {
+            REXGPU_INFO("shader_origins: microcode {:016X} present at {:08X}", watched.hash,
+                        watched.address);
+            present.push_back(watched.hash);
           } else {
-            ++it;
+            // Catch the next write to it. A write unprotects the whole page,
+            // so this re-arms after each one, 20 ms apart at most.
+            memory->EnablePhysicalMemoryAccessCallbacks(watched.physical, watched.size, true,
+                                                        false);
           }
+        }
+        if (!present.empty()) {
+          std::lock_guard<std::mutex> lock(shader_origins_mutex);
+          std::erase_if(shader_origins_pending, [&](const ShaderOriginsWatched& watched) {
+            return std::find(present.begin(), present.end(), watched.hash) != present.end();
+          });
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       }
