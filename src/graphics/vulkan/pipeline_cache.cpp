@@ -703,6 +703,14 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
            pipeline_storage_file_);
   }
 
+  // Both files were read before being written, and C requires a positioning
+  // call between input and output on an update stream. glibc tolerates its
+  // absence; the PS5's libc fails every later fwrite.
+  clearerr(pipeline_storage_file_);
+  rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_END);
+  clearerr(shader_storage_file_);
+  rex::filesystem::Seek(shader_storage_file_, 0, SEEK_END);
+
   shader_storage_cache_root_ = cache_root;
   shader_storage_title_id_ = title_id;
 
