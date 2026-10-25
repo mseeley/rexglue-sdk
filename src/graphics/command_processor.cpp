@@ -13,7 +13,10 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 
 #include <fmt/format.h>
@@ -31,6 +34,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/hash.h>
 #include <rex/memory.h>
 #include <rex/memory/ring_buffer.h>
 #include <rex/stream.h>
@@ -38,6 +42,9 @@
 #include <rex/system/user_module.h>
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+REXCVAR_DEFINE_STRING(log_shader_origins_watch, "", "Perf",
+                      "File of \"hash virtual_address dwords\" lines (hex): poll those guest "
+                      "addresses every 20 ms and log when each shader's microcode is there");
 
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
@@ -1516,6 +1523,58 @@ bool CommandProcessor::ExecutePacketType3_SET_SHADER_CONSTANTS(memory::RingBuffe
   return true;
 }
 
+namespace {
+
+// log_shader_origins_watch: when each listed shader's microcode is complete in
+// guest memory, however it got there. Started at the first IM_LOAD, after the
+// game has set up the memory its shaders live in.
+void StartShaderOriginsWatch(memory::Memory* memory) {
+  static std::once_flag started;
+  std::call_once(started, [memory]() {
+    const std::string& path = REXCVAR_GET(log_shader_origins_watch);
+    if (path.empty()) {
+      return;
+    }
+    struct Watched {
+      uint64_t hash;
+      uint32_t address;
+      uint32_t dwords;
+    };
+    std::vector<Watched> watched;
+    std::ifstream file(path);
+    std::string hash, address, dwords;
+    while (file >> hash >> address >> dwords) {
+      watched.push_back({std::stoull(hash, nullptr, 16), uint32_t(std::stoul(address, nullptr, 16)),
+                         uint32_t(std::stoul(dwords, nullptr, 16))});
+    }
+    REXGPU_INFO("shader_origins: watching {} shaders from {}", watched.size(), path);
+    std::thread([memory, watched = std::move(watched)]() mutable {
+      auto readable = [memory](uint32_t address) {
+        memory::BaseHeap* heap = memory->LookupHeap(address);
+        uint32_t protect = 0;
+        return heap && heap->QueryProtect(address, &protect) &&
+               (protect & memory::kMemoryProtectRead);
+      };
+      while (!watched.empty()) {
+        for (auto it = watched.begin(); it != watched.end();) {
+          uint32_t size = it->dwords * 4;
+          if (readable(it->address) && readable(it->address + size - 1) &&
+              XXH3_64bits(memory->TranslateVirtual(it->address), size) == it->hash) {
+            REXGPU_INFO("shader_origins: microcode {:016X} present at {:08X}", it->hash,
+                        it->address);
+            it = watched.erase(it);
+          } else {
+            ++it;
+          }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+    }).detach();
+  });
+}
+
+}  // namespace
+
 bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
@@ -1532,6 +1591,7 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, ui
   auto shader =
       LoadShader(shader_type, addr, memory_->TranslatePhysical<uint32_t*>(addr), size_dwords);
   if (shader && rex::perf::frame_stats::log_shader_origins()) {
+    StartShaderOriginsWatch(memory_);
     static std::unordered_set<const Shader*> logged_shaders;
     if (logged_shaders.insert(shader).second) {
       REXGPU_INFO("shader_origins: first IM_LOAD {} {:016X} at physical {:08X}, {} dwords",
