@@ -24,6 +24,7 @@
 #include <set>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -86,6 +87,12 @@ class VulkanPipelineCache {
 
   bool EnsureShadersTranslated(VulkanShader::VulkanTranslation* vertex_shader,
                                VulkanShader::VulkanTranslation* pixel_shader);
+  // With async shader compilation, queues the translations still needed on
+  // the creation threads instead of translating them here. Returns false if a
+  // translation has failed; sets pending_out if one is still queued or
+  // running, in which case the draw must be skipped.
+  bool RequestShadersTranslated(VulkanShader::VulkanTranslation* vertex_shader,
+                                VulkanShader::VulkanTranslation* pixel_shader, bool& pending_out);
   // TODO(Triang3l): Return a deferred creation handle.
   bool ConfigurePipeline(
       VulkanShader::VulkanTranslation* vertex_shader, VulkanShader::VulkanTranslation* pixel_shader,
@@ -96,7 +103,7 @@ class VulkanPipelineCache {
   bool IsCreatingPipelines() const;
   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
                                     const PipelineLayoutProvider*& pipeline_layout_out,
-                                    bool* is_placeholder_out = nullptr) const;
+                                    bool* creation_pending_out = nullptr) const;
 
  private:
   REXPACKEDSTRUCT(ShaderStoredHeader, {
@@ -237,14 +244,14 @@ class VulkanPipelineCache {
     // The layouts are owned by the VulkanCommandProcessor, and must not be
     // destroyed by it while the pipeline cache is active.
     std::atomic<const PipelineLayoutProvider*> pipeline_layout{nullptr};
-    std::atomic<bool> is_placeholder{false};
+    std::atomic<bool> creation_pending{false};
     Pipeline() = default;
     Pipeline(const PipelineLayoutProvider* pipeline_layout_provider)
         : pipeline_layout(pipeline_layout_provider) {}
     Pipeline(const Pipeline& other)
         : pipeline(other.pipeline.load(std::memory_order_acquire)),
           pipeline_layout(other.pipeline_layout.load(std::memory_order_acquire)),
-          is_placeholder(other.is_placeholder.load(std::memory_order_acquire)) {}
+          creation_pending(other.creation_pending.load(std::memory_order_acquire)) {}
     Pipeline& operator=(const Pipeline& other) {
       if (this == &other) {
         return *this;
@@ -252,7 +259,7 @@ class VulkanPipelineCache {
       pipeline.store(other.pipeline.load(std::memory_order_acquire), std::memory_order_release);
       pipeline_layout.store(other.pipeline_layout.load(std::memory_order_acquire),
                             std::memory_order_release);
-      is_placeholder.store(other.is_placeholder.load(std::memory_order_acquire),
+      creation_pending.store(other.creation_pending.load(std::memory_order_acquire),
                            std::memory_order_release);
       return *this;
     }
@@ -328,7 +335,9 @@ class VulkanPipelineCache {
   VulkanShader* LoadShader(xenos::ShaderType shader_type, const uint32_t* host_address,
                            uint32_t dword_count, uint64_t data_hash);
 
-  // Can be called from multiple threads.
+  std::unique_ptr<SpirvShaderTranslator> CreateShaderTranslator() const;
+  // Can be called from multiple threads, but not for two translations of the
+  // same shader at once.
   bool TranslateAnalyzedShader(SpirvShaderTranslator& translator,
                                VulkanShader::VulkanTranslation& translation);
 
@@ -359,17 +368,15 @@ class VulkanPipelineCache {
   bool TryGetPipelineCreationArgumentsForDescription(
       const PipelineDescription& description,
       std::pair<const PipelineDescription, Pipeline>* pipeline,
-      PipelineCreationArguments& creation_arguments, bool for_placeholder = false);
+      PipelineCreationArguments& creation_arguments);
 
   // Can be called from creation threads - all needed data must be fully set up
   // at the point of the call: shaders must be translated, and the pipeline
   // layout and render pass object (unless dynamic rendering is used) must be
   // available.
-  bool EnsurePipelineCreated(const PipelineCreationArguments& creation_arguments,
-                             VkShaderModule fragment_shader_override = VK_NULL_HANDLE);
+  bool EnsurePipelineCreated(const PipelineCreationArguments& creation_arguments);
   void CreationThread(size_t thread_index);
   void CreateQueuedPipelinesOnProcessorThread();
-  void ProcessDeferredPipelineDestructions(bool force_all);
 
   VulkanCommandProcessor& command_processor_;
   const RegisterFile& register_file_;
@@ -415,7 +422,6 @@ class VulkanPipelineCache {
   // Empty depth-only pixel shader for writing to depth buffer using fragment
   // shader interlock when no Xenos pixel shader provided.
   VkShaderModule depth_only_fragment_shader_ = VK_NULL_HANDLE;
-  VkShaderModule placeholder_pixel_shader_ = VK_NULL_HANDLE;
   // Depth-only shaders for float24 emulation when no Xenos pixel shader is
   // provided in host render target mode.
   VkShaderModule depth_float24_truncate_fragment_shader_ = VK_NULL_HANDLE;
@@ -425,9 +431,6 @@ class VulkanPipelineCache {
 
   // Previously used pipeline, to avoid lookups if the state wasn't changed.
   const std::pair<const PipelineDescription, Pipeline>* last_pipeline_ = nullptr;
-  // <Submission index, pipeline>.
-  std::deque<std::pair<uint64_t, VkPipeline>> deferred_destroy_pipelines_;
-  std::mutex deferred_destroy_lock_;
 
   // Currently open shader storage path.
   std::filesystem::path shader_storage_cache_root_;
@@ -463,6 +466,14 @@ class VulkanPipelineCache {
                       PipelineCreationArgumentsPriorityComparator>
       creation_queue_;
   size_t creation_threads_busy_ = 0;
+  // Shader translations for the creation threads, which run them before
+  // pipeline creations. Two translations of one shader never run at once, as
+  // the first sets up the bindings shared by all of the shader's translations.
+  std::deque<VulkanShader::VulkanTranslation*> translation_queue_;
+  // Queued or running.
+  std::unordered_set<const VulkanShader::VulkanTranslation*> translations_pending_;
+  std::unordered_set<const VulkanShader::VulkanTranslation*> translations_failed_;
+  std::unordered_set<const Shader*> shaders_translating_;
   bool startup_loading_ = false;
   std::unique_ptr<rex::thread::Event> creation_completion_event_;
   bool creation_completion_set_event_ = false;
