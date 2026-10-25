@@ -153,6 +153,23 @@ inline void NoteSignal(const void* object) {
   }
 }
 
+// log_frame_stats_cp_waits: with log_frame_stats, the command processor's
+// WAIT_REG_MEM waits by what they poll, once a second.
+bool cp_waits();
+// One finished WAIT_REG_MEM: a register (or physical memory address, with
+// memory), the compare function, reference, mask and wait interval from the
+// packet, the polls it took and the last value read.
+struct CpWait {
+  bool memory = false;
+  uint32_t address = 0;
+  uint32_t function = 0;
+  uint32_t ref = 0;
+  uint32_t mask = 0;
+  uint32_t interval = 0;
+};
+void NoteCpWait(const CpWait& wait, uint64_t us, uint32_t polls, uint32_t sleeps,
+                uint32_t last_value);
+
 // Adds the time of a guest kernel wait or delay to the swap thread's stats,
 // when on that thread; with a WaitTarget, to its per-target tally as well.
 class SwapThreadWait {

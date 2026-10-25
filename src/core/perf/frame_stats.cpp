@@ -22,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #ifdef _WIN32
@@ -71,6 +72,10 @@ REXCVAR_DEFINE_BOOL(log_frame_stats_swap_waits, false, "Perf",
                     "With log_frame_stats, also log the swap thread's guest kernel waits by "
                     "guest caller and object, and which threads signalled those objects, once "
                     "a second");
+
+REXCVAR_DEFINE_BOOL(log_frame_stats_cp_waits, false, "Perf",
+                    "With log_frame_stats, also log the command processor's WAIT_REG_MEM "
+                    "waits by register or address, once a second");
 
 REXCVAR_DEFINE_BOOL(log_shader_origins, false, "Perf",
                     "Log physical allocations with their guest callers, file reads into guest "
@@ -463,6 +468,66 @@ void LogSwapWaits() {
 
 }  // namespace
 
+bool cp_waits() {
+  return REXCVAR_GET(log_frame_stats) && REXCVAR_GET(log_frame_stats_cp_waits);
+}
+
+namespace {
+
+struct CpWaitTally {
+  CpWait wait;
+  uint64_t waits = 0;
+  uint64_t us = 0;
+  uint64_t polls = 0;
+  uint64_t sleeps = 0;
+  uint64_t max_us = 0;
+  uint32_t last_value = 0;
+};
+std::mutex g_cp_waits_mutex;
+std::map<std::tuple<bool, uint32_t, uint32_t, uint32_t, uint32_t>, CpWaitTally> g_cp_waits;
+
+void LogCpWaits() {
+  std::vector<CpWaitTally> tallies;
+  {
+    std::lock_guard<std::mutex> lock(g_cp_waits_mutex);
+    for (const auto& [key, tally] : g_cp_waits) {
+      tallies.push_back(tally);
+    }
+    g_cp_waits.clear();
+  }
+  std::sort(tallies.begin(), tallies.end(),
+            [](const CpWaitTally& a, const CpWaitTally& b) { return a.us > b.us; });
+  std::string line;
+  for (size_t i = 0; i < tallies.size() && i < 6; ++i) {
+    const CpWaitTally& tally = tallies[i];
+    static const char* const kFunctions[] = {"never", "<", "<=", "==", "!=", ">=", ">", "always"};
+    line += fmt::format(
+        " | {} {:08X} & {:08X} {} {:08X} (interval {:X}): {} waits {:.1f} ms (longest {:.1f}), "
+        "{} polls, {} sleeps, last value {:08X}",
+        tally.wait.memory ? "memory" : "register", tally.wait.address, tally.wait.mask,
+        kFunctions[tally.wait.function & 7], tally.wait.ref, tally.wait.interval, tally.waits,
+        double(tally.us) / 1000.0, double(tally.max_us) / 1000.0, tally.polls, tally.sleeps,
+        tally.last_value);
+  }
+  REXLOG_INFO("frame_stats: cp waits: {} targets{}", tallies.size(), line);
+}
+
+}  // namespace
+
+void NoteCpWait(const CpWait& wait, uint64_t us, uint32_t polls, uint32_t sleeps,
+                uint32_t last_value) {
+  std::lock_guard<std::mutex> lock(g_cp_waits_mutex);
+  CpWaitTally& tally =
+      g_cp_waits[{wait.memory, wait.address, wait.function, wait.ref, wait.interval}];
+  tally.wait = wait;
+  ++tally.waits;
+  tally.us += us;
+  tally.polls += polls;
+  tally.sleeps += sleeps;
+  tally.max_us = std::max(tally.max_us, us);
+  tally.last_value = last_value;
+}
+
 void SwapThreadWait::NoteSwapThreadWait(const WaitTarget& target, uint64_t us) {
   WaitTally& tally = g_wait_tallies[{target.caller, target.object}];
   tally.target = target;
@@ -657,6 +722,9 @@ void OnGuestSwap() {
   }
   if (swap_waits()) {
     LogSwapWaits();
+  }
+  if (cp_waits()) {
+    LogCpWaits();
   }
   window_start_us = now_us;
   window_totals = totals;

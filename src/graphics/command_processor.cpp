@@ -1025,6 +1025,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
   bool is_memory = (wait_info & 0x10) != 0;
 
   rex::perf::frame_stats::ScopedTimer wait_timer(rex::perf::frame_stats::Stat::kCpWaitUs);
+  const bool note_wait = rex::perf::frame_stats::cp_waits();
+  const uint64_t note_start_us = note_wait ? rex::perf::frame_stats::NowUs() : 0;
+  uint32_t polls = 0, sleeps = 0, last_value = 0;
   bool matched = false;
   do {
     uint32_t value = 0;
@@ -1039,6 +1042,8 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
         value = ReadRegisterValue(poll_reg_addr);
       }
     }
+    ++polls;
+    last_value = value;
     switch (wait_info & 0x7) {
       case 0x0:  // Never.
         matched = false;
@@ -1068,6 +1073,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
     if (!matched) {
       // Wait.
       if (wait >= 0x100) {
+        ++sleeps;
         PrepareForWait();
         if (!REXCVAR_GET(vsync)) {
           // User wants it fast and dangerous.
@@ -1087,6 +1093,11 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       }
     }
   } while (!matched);
+  if (note_wait) {
+    rex::perf::frame_stats::NoteCpWait({is_memory, poll_reg_addr, wait_info & 0x7, ref, mask, wait},
+                                       rex::perf::frame_stats::NowUs() - note_start_us, polls,
+                                       sleeps, last_value);
+  }
 
   return true;
 }
