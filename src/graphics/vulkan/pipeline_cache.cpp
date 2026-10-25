@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -3642,7 +3643,9 @@ void VulkanPipelineCache::StorageWriteThread() {
     if (flush_pipelines) {
       flush_pipelines = false;
       assert_not_null(pipeline_storage_file_);
-      fflush(pipeline_storage_file_);
+      if (fflush(pipeline_storage_file_)) {
+        REXGPU_ERROR("VulkanPipelineCache: Failed to flush the pipeline storage: errno {}", errno);
+      }
     }
 
     const Shader* shader = nullptr;
@@ -3699,7 +3702,11 @@ void VulkanPipelineCache::StorageWriteThread() {
 
     if (write_pipeline) {
       assert_not_null(pipeline_storage_file_);
-      fwrite(&pipeline_description, sizeof(pipeline_description), 1, pipeline_storage_file_);
+      if (!fwrite(&pipeline_description, sizeof(pipeline_description), 1,
+                  pipeline_storage_file_)) {
+        REXGPU_ERROR("VulkanPipelineCache: Failed to write to the pipeline storage: errno {}",
+                     errno);
+      }
     }
   }
 }
