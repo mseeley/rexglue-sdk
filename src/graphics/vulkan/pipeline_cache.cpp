@@ -1244,7 +1244,8 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
   // If this fails the shader will be marked as invalid and ignored later.
   rex::perf::frame_stats::ScopedTimer translate_timer(
       rex::perf::frame_stats::Stat::kShaderTranslateUs,
-      rex::perf::frame_stats::Stat::kShadersTranslated);
+      rex::perf::frame_stats::Stat::kShadersTranslated,
+      rex::perf::frame_stats::Stat::kShaderTranslateCpuUs);
   if (!translator.TranslateAnalyzedShader(translation)) {
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;
@@ -3501,7 +3502,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   {
     rex::perf::frame_stats::ScopedTimer create_timer(
         rex::perf::frame_stats::Stat::kPipelineCreateUs,
-        rex::perf::frame_stats::Stat::kPipelinesCreated);
+        rex::perf::frame_stats::Stat::kPipelinesCreated,
+        rex::perf::frame_stats::Stat::kPipelineCreateCpuUs);
     create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info,
                                                   nullptr, &pipeline);
   }

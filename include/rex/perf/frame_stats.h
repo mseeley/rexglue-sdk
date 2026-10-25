@@ -23,9 +23,11 @@ enum class Stat : uint32_t {
   kDraws,
   kPipelinesCreated,  // vkCreateGraphicsPipelines calls, any thread
   kPipelineCreateUs,
-  kPipelineBlockUs,  // command processor blocked on a pipeline cache miss
+  kPipelineCreateCpuUs,  // thread CPU time of the above
+  kPipelineBlockUs,      // command processor blocked on a pipeline cache miss
   kShadersTranslated,
   kShaderTranslateUs,
+  kShaderTranslateCpuUs,  // thread CPU time of the above
   kTextureLoads,
   kTextureLoadUs,
   kFileReads,
@@ -41,21 +43,32 @@ enum class Stat : uint32_t {
 bool enabled();
 void Add(Stat stat, uint64_t value);
 uint64_t NowUs();
+// CPU time used by the calling thread.
+uint64_t ThreadCpuUs();
 
 // Called by VdSwap on the guest thread; logs once a second and for each slow
 // frame.
 void OnGuestSwap();
 
-// Adds the elapsed microseconds to a stat, and optionally counts one event.
+// Adds the elapsed microseconds to a stat, optionally the thread CPU time
+// used meanwhile to another, and optionally counts one event.
 class ScopedTimer {
  public:
-  explicit ScopedTimer(Stat time_stat, Stat count_stat = Stat::kCount)
-      : time_stat_(time_stat), count_stat_(count_stat), start_(enabled() ? NowUs() : 0) {}
+  explicit ScopedTimer(Stat time_stat, Stat count_stat = Stat::kCount,
+                       Stat cpu_time_stat = Stat::kCount)
+      : time_stat_(time_stat),
+        count_stat_(count_stat),
+        cpu_time_stat_(cpu_time_stat),
+        start_(enabled() ? NowUs() : 0),
+        cpu_start_(start_ && cpu_time_stat != Stat::kCount ? ThreadCpuUs() : 0) {}
   ~ScopedTimer() {
     if (!start_) {
       return;
     }
     Add(time_stat_, NowUs() - start_);
+    if (cpu_time_stat_ != Stat::kCount) {
+      Add(cpu_time_stat_, ThreadCpuUs() - cpu_start_);
+    }
     if (count_stat_ != Stat::kCount) {
       Add(count_stat_, 1);
     }
@@ -66,7 +79,9 @@ class ScopedTimer {
  private:
   Stat time_stat_;
   Stat count_stat_;
+  Stat cpu_time_stat_;
   uint64_t start_;
+  uint64_t cpu_start_;
 };
 
 }  // namespace rex::perf::frame_stats

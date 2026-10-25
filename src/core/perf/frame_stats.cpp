@@ -17,6 +17,12 @@
 #include <mutex>
 #include <string>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 #include <fmt/format.h>
 
 REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
@@ -47,16 +53,17 @@ std::string FormatStats(const Totals& now, const Totals& before) {
   auto ms = [&](Stat stat) { return double(d(stat)) / 1000.0; };
   return fmt::format(
       "cp swaps {} idle {:.0f} ms wait {:.0f} ms | fence {} waits {:.1f} ms | draws {} | "
-      "pipelines {} ({:.1f} ms, cp blocked {:.1f} ms) | shaders {} ({:.1f} ms) | "
+      "pipelines {} ({:.1f} ms, cpu {:.1f} ms, cp blocked {:.1f} ms) | shaders {} ({:.1f} ms, "
+      "cpu {:.1f} ms) | "
       "textures {} ({:.1f} ms) | files {} {:.2f} MB ({:.1f} ms) | faults {} ({:.1f} ms) | xma "
       "drained {} starved {}",
       d(Stat::kCpSwaps), ms(Stat::kCpIdleUs), ms(Stat::kCpWaitUs), d(Stat::kFenceWaits),
       ms(Stat::kFenceWaitUs), d(Stat::kDraws), d(Stat::kPipelinesCreated),
-      ms(Stat::kPipelineCreateUs), ms(Stat::kPipelineBlockUs), d(Stat::kShadersTranslated),
-      ms(Stat::kShaderTranslateUs), d(Stat::kTextureLoads), ms(Stat::kTextureLoadUs),
-      d(Stat::kFileReads), double(d(Stat::kFileReadBytes)) / (1024.0 * 1024.0),
-      ms(Stat::kFileReadUs), d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained),
-      d(Stat::kXmaStarved));
+      ms(Stat::kPipelineCreateUs), ms(Stat::kPipelineCreateCpuUs), ms(Stat::kPipelineBlockUs),
+      d(Stat::kShadersTranslated), ms(Stat::kShaderTranslateUs), ms(Stat::kShaderTranslateCpuUs),
+      d(Stat::kTextureLoads), ms(Stat::kTextureLoadUs), d(Stat::kFileReads),
+      double(d(Stat::kFileReadBytes)) / (1024.0 * 1024.0), ms(Stat::kFileReadUs),
+      d(Stat::kAccessFaults), ms(Stat::kAccessFaultUs), d(Stat::kXmaDrained), d(Stat::kXmaStarved));
 }
 
 }  // namespace
@@ -75,6 +82,25 @@ uint64_t NowUs() {
                       std::chrono::steady_clock::now().time_since_epoch())
                       .count()) +
          1;
+}
+
+uint64_t ThreadCpuUs() {
+#ifdef _WIN32
+  FILETIME creation, exit, kernel, user;
+  if (!GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user)) {
+    return 0;
+  }
+  auto to_100ns = [](const FILETIME& time) {
+    return (uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+  };
+  return (to_100ns(kernel) + to_100ns(user)) / 10;
+#else
+  timespec time;
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time)) {
+    return 0;
+  }
+  return uint64_t(time.tv_sec) * 1000000 + uint64_t(time.tv_nsec) / 1000;
+#endif
 }
 
 void OnGuestSwap() {
