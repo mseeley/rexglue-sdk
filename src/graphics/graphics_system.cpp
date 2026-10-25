@@ -280,6 +280,12 @@ void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
   register_file_.values[r] = value;
 }
 
+void GraphicsSystem::PretranslatePixelShader(const PixelShaderPretranslation& pretranslation) {
+  if (command_processor_) {
+    command_processor_->PretranslatePixelShader(pretranslation);
+  }
+}
+
 void GraphicsSystem::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
   command_processor_->InitializeRingBuffer(ptr, size_log2);
 }

@@ -84,6 +84,31 @@ class VulkanPipelineCache {
   SpirvShaderTranslator::Modification GetCurrentPixelShaderModification(
       const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
       reg::RB_DEPTHCONTROL normalized_depth_control) const;
+  // The draw state a pixel shader modification depends on.
+  struct PixelShaderDrawState {
+    reg::SQ_PROGRAM_CNTL sq_program_cntl;
+    reg::SQ_CONTEXT_MISC sq_context_misc;
+    reg::SQ_INTERPOLATOR_CNTL sq_interpolator_cntl;
+    xenos::MsaaSamples msaa_samples;
+    bool point_list;
+    reg::RB_DEPTHCONTROL normalized_depth_control;
+    reg::RB_DEPTH_INFO rb_depth_info;
+    reg::RB_COLORCONTROL rb_colorcontrol;
+  };
+  SpirvShaderTranslator::Modification GetPixelShaderModification(
+      const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
+      const PixelShaderDrawState& state) const;
+
+  // Translates a pixel shader on a creation thread ahead of its first draw,
+  // for the modification predicted from the registers its shader object sets.
+  // The vertex shaders it will be drawn with are assumed to write every
+  // interpolator SQ_INTERPOLATOR_CNTL lists. Creation threads run these only
+  // when no draw is waiting; a draw needing one moves it to the front.
+  // Command processor thread.
+  void PretranslatePixelShader(VulkanShader& shader, reg::SQ_PROGRAM_CNTL sq_program_cntl,
+                               reg::SQ_CONTEXT_MISC sq_context_misc,
+                               reg::SQ_INTERPOLATOR_CNTL sq_interpolator_cntl,
+                               xenos::MsaaSamples msaa_samples);
 
   bool EnsureShadersTranslated(VulkanShader::VulkanTranslation* vertex_shader,
                                VulkanShader::VulkanTranslation* pixel_shader);
@@ -474,6 +499,14 @@ class VulkanPipelineCache {
   std::unordered_set<const VulkanShader::VulkanTranslation*> translations_pending_;
   std::unordered_set<const VulkanShader::VulkanTranslation*> translations_failed_;
   std::unordered_set<const Shader*> shaders_translating_;
+  // Translations ahead of any draw, run when nothing else is queued.
+  std::deque<VulkanShader::VulkanTranslation*> pretranslation_queue_;
+  // Part of creation_threads_busy_, but not a reason to hold submissions.
+  size_t pretranslations_running_ = 0;
+  // Every translation requested by PretranslatePixelShader, for its log.
+  std::unordered_set<const VulkanShader::VulkanTranslation*> pretranslations_;
+  // Pixel translations a draw has requested, for the pretranslation log.
+  std::unordered_set<const VulkanShader::VulkanTranslation*> pretranslation_log_drawn_;
   bool startup_loading_ = false;
   std::unique_ptr<rex::thread::Event> creation_completion_event_;
   bool creation_completion_set_event_ = false;

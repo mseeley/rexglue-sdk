@@ -55,6 +55,14 @@ REXCVAR_DEFINE_INT32(
     .range(-1, 32)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(vulkan_pretranslate_pixel_shaders, true, "GPU/Vulkan",
+                    "With async shader compilation, translate pixel shaders the game reports "
+                    "before their first draw")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(log_pretranslation, false, "GPU/Vulkan",
+                    "Log each pixel shader translated ahead of its first draw, and whether its "
+                    "first draw found it");
+
 REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
                     "Render tessellation as wireframe")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -793,6 +801,10 @@ void VulkanPipelineCache::Shutdown() {
     translations_pending_.clear();
     translations_failed_.clear();
     shaders_translating_.clear();
+    pretranslation_queue_.clear();
+    pretranslations_running_ = 0;
+    pretranslations_.clear();
+    pretranslation_log_drawn_.clear();
     creation_threads_busy_ = 0;
     startup_loading_ = false;
     creation_completion_set_event_ = false;
@@ -942,26 +954,40 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
 SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderModification(
     const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
     reg::RB_DEPTHCONTROL normalized_depth_control) const {
+  const auto& regs = register_file_;
+  PixelShaderDrawState state;
+  state.sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
+  state.sq_context_misc = regs.Get<reg::SQ_CONTEXT_MISC>();
+  state.sq_interpolator_cntl = regs.Get<reg::SQ_INTERPOLATOR_CNTL>();
+  state.msaa_samples = regs.Get<reg::RB_SURFACE_INFO>().msaa_samples;
+  state.point_list =
+      regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kPointList;
+  state.normalized_depth_control = normalized_depth_control;
+  state.rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  state.rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+  return GetPixelShaderModification(shader, interpolator_mask, param_gen_pos, state);
+}
+
+SpirvShaderTranslator::Modification VulkanPipelineCache::GetPixelShaderModification(
+    const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
+    const PixelShaderDrawState& state) const {
   assert_true(shader.type() == xenos::ShaderType::kPixel);
   assert_true(shader.is_ucode_analyzed());
-  const auto& regs = register_file_;
 
   SpirvShaderTranslator::Modification modification(
       shader_translator_->GetDefaultPixelShaderModification(
-          shader.GetDynamicAddressableRegisterCount(regs.Get<reg::SQ_PROGRAM_CNTL>().ps_num_reg)));
+          shader.GetDynamicAddressableRegisterCount(state.sq_program_cntl.ps_num_reg)));
 
   modification.pixel.interpolator_mask = interpolator_mask;
   modification.pixel.interpolators_centroid =
       interpolator_mask & ~xenos::GetInterpolatorSamplingPattern(
-                              regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
-                              regs.Get<reg::SQ_CONTEXT_MISC>().sc_sample_cntl,
-                              regs.Get<reg::SQ_INTERPOLATOR_CNTL>().sampling_pattern);
+                              state.msaa_samples, state.sq_context_misc.sc_sample_cntl,
+                              state.sq_interpolator_cntl.sampling_pattern);
 
   if (param_gen_pos < xenos::kMaxInterpolators) {
     modification.pixel.param_gen_enable = 1;
     modification.pixel.param_gen_interpolator = param_gen_pos;
-    modification.pixel.param_gen_point =
-        uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kPointList);
+    modification.pixel.param_gen_point = uint32_t(state.point_list);
   } else {
     modification.pixel.param_gen_enable = 0;
     modification.pixel.param_gen_interpolator = 0;
@@ -971,8 +997,8 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
   if (render_target_cache_.GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
     using DepthStencilMode = SpirvShaderTranslator::Modification::DepthStencilMode;
     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
-        normalized_depth_control.z_enable &&
-        regs.Get<reg::RB_DEPTH_INFO>().depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
+        state.normalized_depth_control.z_enable &&
+        state.rb_depth_info.depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
       // For host D32 depth, emulate guest D24FS8 float24 depth behavior.
       modification.pixel.depth_stencil_mode = render_target_cache_.depth_float24_round()
                                                   ? DepthStencilMode::kFloat24Rounding
@@ -980,7 +1006,7 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
     } else {
       if (shader.implicit_early_z_write_allowed() &&
           (!shader.writes_color_target(0) ||
-           !draw_util::DoesCoverageDependOnAlpha(regs.Get<reg::RB_COLORCONTROL>()))) {
+           !draw_util::DoesCoverageDependOnAlpha(state.rb_colorcontrol))) {
         modification.pixel.depth_stencil_mode = DepthStencilMode::kEarlyHint;
       } else {
         modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
@@ -1047,7 +1073,29 @@ bool VulkanPipelineCache::RequestShadersTranslated(VulkanShader::VulkanTranslati
       if (translations_failed_.count(translation)) {
         return false;
       }
+      if (translation == pixel_shader && REXCVAR_GET(log_pretranslation) &&
+          pretranslation_log_drawn_.insert(translation).second) {
+        bool pretranslated = pretranslations_.count(translation) != 0;
+        REXGPU_INFO("Pretranslation: pixel {:016X} modification {:016X} first drawn: {}",
+                    translation->shader().ucode_data_hash(), translation->modification(),
+                    !pretranslated                ? "not pretranslated"
+                    : translation->is_translated() ? "ready"
+                    : translations_pending_.count(translation)
+                        ? (std::find(pretranslation_queue_.begin(), pretranslation_queue_.end(),
+                                     translation) != pretranslation_queue_.end()
+                               ? "queued"
+                               : "translating")
+                        : "unknown");
+      }
       if (translations_pending_.count(translation)) {
+        // A pretranslation not started yet: a draw needs it now.
+        auto pretranslation_it =
+            std::find(pretranslation_queue_.begin(), pretranslation_queue_.end(), translation);
+        if (pretranslation_it != pretranslation_queue_.end()) {
+          pretranslation_queue_.erase(pretranslation_it);
+          translation_queue_.push_front(translation);
+          notify = true;
+        }
         pending_out = true;
         continue;
       }
@@ -1068,6 +1116,58 @@ bool VulkanPipelineCache::RequestShadersTranslated(VulkanShader::VulkanTranslati
     creation_request_cond_.notify_all();
   }
   return true;
+}
+
+void VulkanPipelineCache::PretranslatePixelShader(VulkanShader& shader,
+                                                  reg::SQ_PROGRAM_CNTL sq_program_cntl,
+                                                  reg::SQ_CONTEXT_MISC sq_context_misc,
+                                                  reg::SQ_INTERPOLATOR_CNTL sq_interpolator_cntl,
+                                                  xenos::MsaaSamples msaa_samples) {
+  if (!REXCVAR_GET(vulkan_pretranslate_pixel_shaders) || !REXCVAR_GET(async_shader_compilation) ||
+      creation_threads_.empty() || shader.type() != xenos::ShaderType::kPixel) {
+    return;
+  }
+  shader.AnalyzeUcode(ucode_disasm_buffer_);
+  if (shader.memexport_eM_written()) {
+    return;
+  }
+  uint32_t param_gen_pos;
+  uint32_t interpolator_mask =
+      shader.GetInterpolatorInputMask(sq_program_cntl, sq_context_misc, param_gen_pos) &
+      sq_interpolator_cntl.param_shade;
+  PixelShaderDrawState state;
+  state.sq_program_cntl = sq_program_cntl;
+  state.sq_context_misc = sq_context_misc;
+  state.sq_interpolator_cntl = sq_interpolator_cntl;
+  state.msaa_samples = msaa_samples;
+  state.point_list = false;
+  // Only used on the host render target path, where the draw's state isn't
+  // known yet: the current one is a guess.
+  const auto& regs = register_file_;
+  state.normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
+  state.rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  state.rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+  auto* translation = static_cast<VulkanShader::VulkanTranslation*>(shader.GetOrCreateTranslation(
+      GetPixelShaderModification(shader, interpolator_mask, param_gen_pos, state).value));
+  bool queued = false;
+  {
+    std::lock_guard<std::mutex> lock(creation_request_lock_);
+    if (translation->is_translated() || translations_pending_.count(translation) ||
+        translations_failed_.count(translation)) {
+      return;
+    }
+    translations_pending_.insert(translation);
+    pretranslations_.insert(translation);
+    pretranslation_queue_.push_back(translation);
+    queued = true;
+  }
+  if (queued) {
+    if (REXCVAR_GET(log_pretranslation)) {
+      REXGPU_INFO("Pretranslation: pixel {:016X} modification {:016X} queued",
+                  shader.ucode_data_hash(), translation->modification());
+    }
+    creation_request_cond_.notify_one();
+  }
 }
 
 bool VulkanPipelineCache::ConfigurePipeline(
@@ -1242,7 +1342,8 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
   if (creation_threads_.empty()) {
     return startup_loading_;
   }
-  return startup_loading_ || !creation_queue_.empty() || creation_threads_busy_ != 0;
+  return startup_loading_ || !creation_queue_.empty() ||
+         creation_threads_busy_ != pretranslations_running_;
 }
 
 void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
@@ -3538,6 +3639,7 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
   while (true) {
     PipelineCreationArguments creation_arguments;
     VulkanShader::VulkanTranslation* translation = nullptr;
+    bool is_pretranslation = false;
     {
       std::unique_lock<std::mutex> lock(creation_request_lock_);
       // Translations first, as draws and pipeline creations wait for them.
@@ -3548,6 +3650,21 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
             translation_queue_.erase(it);
             shaders_translating_.insert(&translation->shader());
             ++creation_threads_busy_;
+            break;
+          }
+        }
+      }
+      // Then pipelines, and pretranslations only when nothing else is queued.
+      if (!translation && thread_index < creation_threads_shutdown_from_ &&
+          creation_queue_.empty()) {
+        for (auto it = pretranslation_queue_.begin(); it != pretranslation_queue_.end(); ++it) {
+          if (!shaders_translating_.count(&(*it)->shader())) {
+            translation = *it;
+            pretranslation_queue_.erase(it);
+            shaders_translating_.insert(&translation->shader());
+            ++creation_threads_busy_;
+            ++pretranslations_running_;
+            is_pretranslation = true;
             break;
           }
         }
@@ -3585,7 +3702,10 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
           translations_failed_.insert(translation);
         }
         --creation_threads_busy_;
-        more_translations = !translation_queue_.empty();
+        if (is_pretranslation) {
+          --pretranslations_running_;
+        }
+        more_translations = !translation_queue_.empty() || !pretranslation_queue_.empty();
       }
       if (more_translations) {
         // One may have been waiting for this shader.

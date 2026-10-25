@@ -11,12 +11,14 @@
  */
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -136,6 +138,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   void InvalidateGpuMemory() override;
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                bool blocking) override;
+  void PretranslatePixelShader(
+      const system::IGraphicsSystem::PixelShaderPretranslation& pretranslation) override;
 
   ui::vulkan::VulkanDevice* GetVulkanDevice() const {
     return static_cast<const ui::vulkan::VulkanProvider*>(graphics_system_->provider())
@@ -543,6 +547,14 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint32_t frame_skipped_draws_vertex_shader_ = 0;
   uint32_t frame_skipped_draws_pixel_shader_ = 0;
   uint32_t frame_skipped_draws_pipeline_ = 0;
+  // PretranslatePixelShader requests from guest threads, handed to the
+  // pipeline cache on this thread at the next draw.
+  void ProcessPixelShaderPretranslations();
+  std::mutex pretranslation_requests_mutex_;
+  std::vector<system::IGraphicsSystem::PixelShaderPretranslation> pretranslation_requests_;
+  std::atomic<bool> pretranslation_requests_pending_{false};
+  // Draws by MSAA mode: pretranslations assume the most used one.
+  std::array<uint64_t, 4> draws_by_msaa_samples_{};
   // When frames with skipped draws started being held back, if they are.
   std::optional<std::chrono::steady_clock::time_point> incomplete_frames_since_;
   // Guest frame index, since some transient resources can be reused across

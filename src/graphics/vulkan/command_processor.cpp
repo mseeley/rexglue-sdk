@@ -3619,6 +3619,45 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
+void VulkanCommandProcessor::PretranslatePixelShader(
+    const system::IGraphicsSystem::PixelShaderPretranslation& pretranslation) {
+  std::lock_guard<std::mutex> lock(pretranslation_requests_mutex_);
+  pretranslation_requests_.push_back(pretranslation);
+  pretranslation_requests_pending_.store(true, std::memory_order_release);
+}
+
+void VulkanCommandProcessor::ProcessPixelShaderPretranslations() {
+  std::vector<system::IGraphicsSystem::PixelShaderPretranslation> requests;
+  {
+    std::lock_guard<std::mutex> lock(pretranslation_requests_mutex_);
+    requests.swap(pretranslation_requests_);
+    pretranslation_requests_pending_.store(false, std::memory_order_relaxed);
+  }
+  auto msaa_samples = xenos::MsaaSamples(
+      std::max_element(draws_by_msaa_samples_.begin(), draws_by_msaa_samples_.end()) -
+      draws_by_msaa_samples_.begin());
+  for (const auto& request : requests) {
+    uint32_t physical_address = memory_->GetPhysicalAddress(request.guest_address);
+    if (physical_address == UINT32_MAX || !request.dword_count) {
+      continue;
+    }
+    VulkanShader* shader = pipeline_cache_->LoadShader(
+        xenos::ShaderType::kPixel, memory_->TranslatePhysical<const uint32_t*>(physical_address),
+        request.dword_count);
+    if (!shader) {
+      continue;
+    }
+    reg::SQ_PROGRAM_CNTL sq_program_cntl;
+    sq_program_cntl.value = request.sq_program_cntl;
+    reg::SQ_CONTEXT_MISC sq_context_misc;
+    sq_context_misc.value = request.sq_context_misc;
+    reg::SQ_INTERPOLATOR_CNTL sq_interpolator_cntl;
+    sq_interpolator_cntl.value = request.sq_interpolator_cntl;
+    pipeline_cache_->PretranslatePixelShader(*shader, sq_program_cntl, sq_context_misc,
+                                             sq_interpolator_cntl, msaa_samples);
+  }
+}
+
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
@@ -3628,6 +3667,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   const RegisterFile& regs = *register_file_;
+  ++draws_by_msaa_samples_[uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples)];
+  if (pretranslation_requests_pending_.load(std::memory_order_acquire)) {
+    ProcessPixelShaderPretranslations();
+  }
   (void)index_buffer_info;
   auto draw_fail = [&](const char* stage) {
     auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();

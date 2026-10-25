@@ -26,6 +26,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/memory.h>
 #include <rex/memory/ring_buffer.h>
+#include <rex/system/interfaces/graphics.h>
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
 #include <rex/ui/presenter.h>
@@ -114,6 +115,12 @@ class CommandProcessor {
   // awaited.
   virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                        bool blocking);
+
+  // See IGraphicsSystem::PretranslatePixelShader. Any thread.
+  virtual void PretranslatePixelShader(
+      const system::IGraphicsSystem::PixelShaderPretranslation& pretranslation) {
+    (void)pretranslation;
+  }
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2);
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2);
