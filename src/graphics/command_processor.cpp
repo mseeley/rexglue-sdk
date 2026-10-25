@@ -992,6 +992,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
 
   bool is_memory = (wait_info & 0x10) != 0;
 
+  rex::perf::frame_stats::ScopedTimer wait_timer(rex::perf::frame_stats::Stat::kCpWaitUs);
   bool matched = false;
   do {
     uint32_t value = 0;

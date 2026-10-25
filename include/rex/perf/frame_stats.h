@@ -17,6 +17,7 @@ namespace rex::perf::frame_stats {
 enum class Stat : uint32_t {
   kCpSwaps,     // swaps executed by the GPU command processor
   kCpIdleUs,    // command processor waiting for guest commands
+  kCpWaitUs,    // command processor in WAIT_REG_MEM, waiting on a register or memory
   kFenceWaits,  // blocking waits on a GPU submission fence
   kFenceWaitUs,
   kDraws,
