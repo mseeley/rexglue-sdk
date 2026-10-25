@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include <rex/audio/xma/context.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/audio/xma/decoder.h>
 #include <rex/audio/xma/helpers.h>
 #include <rex/dbg.h>
@@ -109,6 +110,14 @@ bool XmaContext::Work() {
   }
 
   memory::RingBuffer output_rb = PrepareOutputRingBuffer(&data);
+  if (output_rb.empty() && rex::perf::frame_stats::enabled()) {
+    // The game has played everything decoded so far: it hears a gap unless
+    // this decode catches up before its next read.
+    rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kXmaDrained, 1);
+    if (!data.IsAnyInputBufferValid()) {
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kXmaStarved, 1);
+    }
+  }
 
   // Consume-only context: no input, just drain remaining subframes.
   if (data.IsConsumeOnlyContext()) {

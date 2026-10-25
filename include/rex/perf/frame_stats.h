@@ -33,6 +33,8 @@ enum class Stat : uint32_t {
   kFileReadUs,
   kAccessFaults,  // guest write-watch access violations
   kAccessFaultUs,
+  kXmaDrained,  // XMA context kicked with its output ring already empty
+  kXmaStarved,  // ... and no valid input buffer to decode either
   kCount
 };
 
