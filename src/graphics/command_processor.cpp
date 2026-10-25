@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <string_view>
+#include <unordered_set>
 
 #include <fmt/format.h>
 
@@ -1530,6 +1531,14 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, ui
 
   auto shader =
       LoadShader(shader_type, addr, memory_->TranslatePhysical<uint32_t*>(addr), size_dwords);
+  if (shader && rex::perf::frame_stats::log_shader_origins()) {
+    static std::unordered_set<const Shader*> logged_shaders;
+    if (logged_shaders.insert(shader).second) {
+      REXGPU_INFO("shader_origins: first IM_LOAD {} {:016X} at physical {:08X}, {} dwords",
+                  shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
+                  shader->ucode_data_hash(), addr, size_dwords);
+    }
+  }
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;
@@ -1560,6 +1569,14 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD_IMMEDIATE(memory::RingBuffer* 
   assert_true(count - 2 >= size_dwords);
   auto shader = LoadShader(shader_type, uint32_t(reader->read_ptr()),
                            reinterpret_cast<uint32_t*>(reader->read_ptr()), size_dwords);
+  if (shader && rex::perf::frame_stats::log_shader_origins()) {
+    static std::unordered_set<const Shader*> logged_shaders;
+    if (logged_shaders.insert(shader).second) {
+      REXGPU_INFO("shader_origins: first IM_LOAD_IMMEDIATE {} {:016X}, {} dwords",
+                  shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
+                  shader->ucode_data_hash(), size_dwords);
+    }
+  }
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;

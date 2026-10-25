@@ -15,12 +15,14 @@
 #include <cstring>
 
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/thread_state.h>
 #include <rex/system/xtypes.h>
 
 namespace rex::kernel::xboxkrnl {
@@ -403,6 +405,41 @@ u32 MmAllocatePhysicalMemoryEx_entry(u32 flags, u32 region_size, u32 protect_bit
     return 0;
   }
   REXKRNL_IMPORT_RESULT("MmAllocatePhysicalMemoryEx", "addr={:#x}", base_address);
+
+  if (rex::perf::frame_stats::log_shader_origins()) {
+    // The guest call stack: the return address into the caller, then the
+    // saved link registers up the back chain (stored 8 bytes below each
+    // caller's frame).
+    auto* memory = REX_KERNEL_MEMORY();
+    PPCContext* ctx = rex::runtime::current_ppc_context();
+    std::string callers = fmt::format("{:08X}", uint32_t(ctx->lr));
+    // Only read committed, readable guest pages: a heap also covers reserved
+    // ones, and reading those faults.
+    auto readable = [memory](uint32_t address) {
+      memory::BaseHeap* heap = memory->LookupHeap(address);
+      uint32_t protect = 0;
+      return heap && heap->QueryProtect(address, &protect) &&
+             (protect & memory::kMemoryProtectRead);
+    };
+    uint32_t frame = ctx->r1.u32;
+    for (int i = 0; i < 8 && frame; ++i) {
+      if (!readable(frame)) {
+        break;
+      }
+      uint32_t back = memory::load_and_swap<uint32_t>(memory->TranslateVirtual(frame));
+      if (back <= frame || !readable(back - 8)) {
+        break;
+      }
+      callers += fmt::format(" {:08X}",
+                             memory::load_and_swap<uint32_t>(memory->TranslateVirtual(back - 8)));
+      frame = back;
+    }
+    REXKRNL_INFO(
+        "shader_origins: physical alloc {:08X} (physical {:08X}) size {:X} protect {:X}, "
+        "callers {}",
+        base_address, heap->GetPhysicalAddress(base_address), adjusted_size,
+        uint32_t(protect_bits), callers);
+  }
 
   return base_address;
 }

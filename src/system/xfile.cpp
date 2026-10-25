@@ -168,6 +168,14 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address, uint32_t buffer_leng
               size_t(byte_offset), &bytes_read);
           if (XSUCCEEDED(result)) {
             rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kFileReadBytes, bytes_read);
+            if (rex::perf::frame_stats::log_shader_origins()) {
+              REXSYS_INFO(
+                  "shader_origins: read {} offset {:X} length {:X} to {:08X} (physical {:08X})",
+                  path(), byte_offset, bytes_read, buffer_guest_address,
+                  buffer_physical_heap
+                      ? buffer_physical_heap->GetPhysicalAddress(buffer_guest_address)
+                      : 0xFFFFFFFFu);
+            }
             if (buffer_physical_heap) {
               buffer_physical_heap->TriggerCallbacks(
                   rex::thread::global_critical_region::AcquireDirect(), buffer_guest_address,

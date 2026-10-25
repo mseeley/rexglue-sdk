@@ -48,6 +48,10 @@ enum class Stat : uint32_t {
 };
 
 bool enabled();
+// log_shader_origins: physical allocations with their guest callers, file
+// reads into guest memory, and each shader's first IM_LOAD - to find where and
+// when the game creates its shaders, ahead of their first draw.
+bool log_shader_origins();
 void Add(Stat stat, uint64_t value);
 uint64_t NowUs();
 // CPU time used by the calling thread.

@@ -32,6 +32,10 @@ REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
 REXCVAR_DEFINE_INT32(log_frame_stats_slow_ms, 100, "Perf",
                      "Frames slower than this get their own log_frame_stats line");
 
+REXCVAR_DEFINE_BOOL(log_shader_origins, false, "Perf",
+                    "Log physical allocations with their guest callers, file reads into guest "
+                    "memory, and each shader's first IM_LOAD");
+
 namespace rex::perf::frame_stats {
 
 namespace {
@@ -75,6 +79,10 @@ std::string FormatStats(const Totals& now, const Totals& before) {
 
 bool enabled() {
   return REXCVAR_GET(log_frame_stats);
+}
+
+bool log_shader_origins() {
+  return REXCVAR_GET(log_shader_origins);
 }
 
 void Add(Stat stat, uint64_t value) {
