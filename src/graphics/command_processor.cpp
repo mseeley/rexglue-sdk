@@ -1579,12 +1579,14 @@ std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t
                                                          uint32_t length, bool exact_range) {
   auto* memory = static_cast<memory::Memory*>(context);
   std::string hashes;
+  std::vector<ShaderOriginsWatched> hit;
   {
     std::lock_guard<std::mutex> lock(shader_origins_mutex);
     for (const ShaderOriginsWatched& watched : shader_origins_pending) {
       if (watched.physical < physical_start + length &&
           physical_start < watched.physical + watched.size) {
         hashes += fmt::format(" {:016X}", watched.hash);
+        hit.push_back(watched);
       }
     }
   }
@@ -1606,10 +1608,52 @@ std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t
 #endif
     guest_address = memory->HostToGuestVirtual(reinterpret_cast<void*>(fault.host_address));
   }
+  // If this write is a copy, find its source: a register of the writing
+  // thread holds the copy's current source pointer, so for each shader being
+  // written, try the start that pointer implies (give or take the copy's
+  // unrolling) and keep one whose bytes hash to the shader's.
+  std::string sources;
+  auto* thread_state = rex::runtime::ThreadState::Get();
+  if (fault.pc && thread_state) {
+    PPCContext* ctx = thread_state->context();
+    const PPCRegister* registers[] = {&ctx->r3,  &ctx->r4,  &ctx->r5,  &ctx->r6,  &ctx->r7,
+                                      &ctx->r8,  &ctx->r9,  &ctx->r10, &ctx->r11, &ctx->r12,
+                                      &ctx->r28, &ctx->r29, &ctx->r30, &ctx->r31};
+    auto readable = [memory](uint32_t address) {
+      memory::BaseHeap* heap = memory->LookupHeap(address);
+      uint32_t protect = 0;
+      return heap && heap->QueryProtect(address, &protect) &&
+             (protect & memory::kMemoryProtectRead);
+    };
+    for (const ShaderOriginsWatched& watched : hit) {
+      if (guest_address < watched.address || guest_address >= watched.address + watched.size) {
+        continue;
+      }
+      uint32_t offset = guest_address - watched.address;
+      bool found = false;
+      for (const PPCRegister* reg : registers) {
+        for (int32_t slack = -256; slack <= 256 && !found; slack += 4) {
+          uint32_t start = reg->u32 - offset + uint32_t(slack);
+          if (start == watched.address || !readable(start) ||
+              !readable(start + watched.size - 1)) {
+            continue;
+          }
+          if (XXH3_64bits(memory->TranslateVirtual(start), watched.size) == watched.hash) {
+            sources += fmt::format(" {:016X}@{:08X}", watched.hash, start);
+            found = true;
+          }
+        }
+        if (found) {
+          break;
+        }
+      }
+    }
+  }
   REXGPU_INFO(
       "shader_origins: write to {:08X} (physical pages {:08X}+{:X}) by {}, callers {}, "
-      "shaders{}",
-      guest_address, physical_start, length, writer, GuestCallers(memory), hashes);
+      "sources{}, shaders{}",
+      guest_address, physical_start, length, writer, GuestCallers(memory),
+      sources.empty() ? " none" : sources, hashes);
   return {0, UINT32_MAX};
 }
 
