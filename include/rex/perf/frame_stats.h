@@ -67,6 +67,11 @@ enum class Stat : uint32_t {
   kCpPackets,             // PM4 packets executed
   kCpRegisterWrites,      // registers written one at a time (WriteRegister)
   kCpBulkRegisterWrites,  // registers written as a block (WriteRegistersFromMem)
+  kHostTickReads,         // Clock::QueryHostTickCount calls, any thread
+  kHostSystemTimeReads,   // Clock::QueryHostSystemTime calls
+  kGuestTickReads,        // Clock::QueryGuestTickCount calls (the guest's time base)
+  kResolves,              // EDRAM resolves (VulkanRenderTargetCache::Resolve)
+  kRenderTargetTransfers, // host render target ownership transfers
   kCount
 };
 

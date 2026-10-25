@@ -8,6 +8,7 @@
 
 #include <rex/assert.h>
 #include <rex/chrono/clock.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/platform.h>
 
 static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
@@ -53,6 +54,7 @@ uint64_t Clock::host_tick_count_platform() {
 }
 
 uint64_t Clock::QueryHostSystemTime() {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kHostSystemTimeReads, 1);
   // https://docs.microsoft.com/en-us/windows/win32/sysinfo/converting-a-time-t-value-to-a-file-time
   constexpr uint64_t seconds_per_day = 3600 * 24;
   // Don't forget the 89 leap days.

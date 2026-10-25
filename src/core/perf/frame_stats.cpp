@@ -81,7 +81,8 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       "drained {} starved {} | guest swap thread cpu {:.1f} ms | gpu {:.1f} ms ({} "
       "submissions) | cp cpu {:.1f} ms, packets {}, registers {} + {} in blocks | draw setup "
       "{:.1f} textures {:.1f} rts {:.1f} pipeline configure {:.1f} bind {:.1f} state {:.1f} "
-      "memory {:.1f} record {:.1f} ms | replay {:.1f} submit {:.1f} output {:.1f} ms",
+      "memory {:.1f} record {:.1f} ms | replay {:.1f} submit {:.1f} output {:.1f} ms | clock "
+      "reads host tick {} system {} guest tick {} | resolves {} rt transfers {}",
       d(Stat::kCpSwaps), ms(Stat::kCpIdleUs), ms(Stat::kCpWaitUs), d(Stat::kFenceWaits),
       ms(Stat::kFenceWaitUs), d(Stat::kDraws), d(Stat::kPipelinesCreated),
       ms(Stat::kPipelineCreateUs), ms(Stat::kPipelineCreateCpuUs), ms(Stat::kPipelineBlockUs),
@@ -100,7 +101,9 @@ std::string FormatStats(const Totals& now, const Totals& before) {
       ms(Stat::kCpDrawRenderTargetsUs), ms(Stat::kCpDrawPipelineConfigureUs),
       ms(Stat::kCpDrawPipelineUs), ms(Stat::kCpDrawStateUs),
       ms(Stat::kCpDrawMemoryUs), ms(Stat::kCpDrawRecordUs), ms(Stat::kCpReplayUs),
-      ms(Stat::kCpQueueSubmitUs), ms(Stat::kCpOutputUs));
+      ms(Stat::kCpQueueSubmitUs), ms(Stat::kCpOutputUs), d(Stat::kHostTickReads),
+      d(Stat::kHostSystemTimeReads), d(Stat::kGuestTickReads), d(Stat::kResolves),
+      d(Stat::kRenderTargetTransfers));
 }
 
 }  // namespace

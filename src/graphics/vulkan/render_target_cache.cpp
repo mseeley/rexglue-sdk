@@ -35,6 +35,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/ui/vulkan/util.h>
 
 REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
@@ -1128,6 +1129,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                       VulkanSharedMemory& shared_memory,
                                       VulkanTextureCache& texture_cache,
                                       uint32_t& written_address_out, uint32_t& written_length_out) {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kResolves, 1);
   written_address_out = 0;
   written_length_out = 0;
 
@@ -4552,6 +4554,12 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     const uint64_t* render_target_resolve_clear_values,
     const Transfer::Rectangle* resolve_clear_rectangle) {
   assert_true(GetPath() == Path::kHostRenderTargets);
+  if (render_target_transfers) {
+    for (uint32_t i = 0; i < render_target_count; ++i) {
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kRenderTargetTransfers,
+                                  render_target_transfers[i].size());
+    }
+  }
 
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   uint64_t current_submission = command_processor_.GetCurrentSubmission();
