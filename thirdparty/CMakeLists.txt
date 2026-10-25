@@ -560,6 +560,11 @@ target_include_directories(libavutil
     PRIVATE ${FFMPEG_ATOMICS_INCLUDE}
 )
 target_compile_definitions(libavutil PRIVATE ${FFMPEG_COMMON_DEFINES})
+# FFmpeg's config.h has no FreeBSD branch; ours comes first there.
+set(FFMPEG_FREEBSD_CONFIG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-config-freebsd")
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    target_include_directories(libavutil BEFORE PRIVATE "${FFMPEG_FREEBSD_CONFIG_DIR}")
+endif()
 target_compile_options(libavutil PRIVATE -w)  # Suppress warnings in third-party code
 if(WIN32)
     target_link_libraries(libavutil PRIVATE bcrypt)
@@ -689,6 +694,9 @@ target_include_directories(libavcodec
     PRIVATE ${FFMPEG_ATOMICS_INCLUDE}
 )
 target_compile_definitions(libavcodec PRIVATE ${FFMPEG_COMMON_DEFINES})
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    target_include_directories(libavcodec BEFORE PRIVATE "${FFMPEG_FREEBSD_CONFIG_DIR}")
+endif()
 target_compile_options(libavcodec PRIVATE -w)  # Suppress warnings in third-party code
 target_link_libraries(libavcodec PUBLIC libavutil)
 if(WIN32)
