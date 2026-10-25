@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -3823,6 +3824,26 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         pixel_shader ? static_cast<VulkanShader::VulkanTranslation*>(
                            pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value))
                      : nullptr;
+    if (rex::perf::frame_stats::log_shader_origins() && pixel_shader_translation &&
+        !pixel_shader_translation->is_translated()) {
+      // The draw state each new pixel shader translation depends on, to see
+      // which of it a shader's modification could be predicted from before
+      // its first draw. Only this thread touches the set.
+      static std::unordered_set<const void*> logged_translations;
+      if (logged_translations.insert(pixel_shader_translation).second) {
+        REXGPU_INFO(
+            "shader_origins: pixel {:016X} modification {:016X} needs SQ_PROGRAM_CNTL {:08X} "
+            "SQ_CONTEXT_MISC {:08X} SQ_INTERPOLATOR_CNTL {:08X} RB_SURFACE_INFO {:08X} "
+            "RB_COLORCONTROL {:08X} RB_DEPTHCONTROL {:08X} static bound {} vertex {:016X} "
+            "writes {:04X}",
+            pixel_shader->ucode_data_hash(), pixel_shader_modification.value,
+            regs.Get<reg::SQ_PROGRAM_CNTL>().value, regs.Get<reg::SQ_CONTEXT_MISC>().value,
+            regs.Get<reg::SQ_INTERPOLATOR_CNTL>().value, regs.Get<reg::RB_SURFACE_INFO>().value,
+            regs.Get<reg::RB_COLORCONTROL>().value, normalized_depth_control.value,
+            pixel_shader->register_static_address_bound(), vertex_shader->ucode_data_hash(),
+            vertex_shader->writes_interpolators());
+      }
+    }
     if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
                                                   pixel_shader_translation)) {
       return draw_fail("shader_translation");
