@@ -34,6 +34,7 @@ enum class Stat : uint32_t {
   kShaderTranslateSysUs,  // kernel part of kShaderTranslateCpuUs (getrusage)
   kShaderTranslateFaults,
   kShaderTranslatePreempts,  // involuntary context switches
+  kShaderTranslateBlocks,    // voluntary context switches: waits, such as on a lock
   kTextureLoads,
   kTextureLoadUs,
   kFileReads,
@@ -58,6 +59,7 @@ struct ThreadUsage {
   uint64_t sys_us = 0;
   uint64_t faults = 0;
   uint64_t preempts = 0;
+  uint64_t blocks = 0;
 };
 ThreadUsage GetThreadUsage();
 

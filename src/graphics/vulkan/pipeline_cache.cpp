@@ -1275,6 +1275,8 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
                                   after.faults - before.faults);
       rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslatePreempts,
                                   after.preempts - before.preempts);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslateBlocks,
+                                  after.blocks - before.blocks);
     }
   } usage_adder{usage_before};
   if (!translator.TranslateAnalyzedShader(translation)) {
