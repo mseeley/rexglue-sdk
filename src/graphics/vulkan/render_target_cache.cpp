@@ -4019,26 +4019,34 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
             spv::Id host_depth_source_tile_index_x =
                 builder.createBinOp(spv::OpUMod, type_uint, host_depth_source_tile_index,
                                     host_depth_source_pitch_tiles);
-            // Finally calculate the host depth source texture coordinates.
+            // Finally calculate the host depth source texture coordinates. A
+            // tile's size in pixels depends on the sample count of the host
+            // depth source image, which may differ from that of the guest
+            // source (for instance, a 1x color source with a 2x host depth
+            // source).
+            uint32_t host_depth_source_tile_width_pixels =
+                tile_width_samples >>
+                uint32_t(key.host_depth_source_msaa_samples >= xenos::MsaaSamples::k4X);
+            uint32_t host_depth_source_tile_height_pixels =
+                tile_height_samples >>
+                uint32_t(key.host_depth_source_msaa_samples >= xenos::MsaaSamples::k2X);
             spv::Id host_depth_source_pixel_x_int = builder.createUnaryOp(
                 spv::OpBitcast, type_int,
                 builder.createBinOp(
                     spv::OpIAdd, type_uint,
-                    builder.createBinOp(spv::OpIMul, type_uint,
-                                        builder.makeUintConstant(tile_width_samples >>
-                                                                 uint32_t(key.source_msaa_samples >=
-                                                                          xenos::MsaaSamples::k4X)),
-                                        host_depth_source_tile_index_x),
+                    builder.createBinOp(
+                        spv::OpIMul, type_uint,
+                        builder.makeUintConstant(host_depth_source_tile_width_pixels),
+                        host_depth_source_tile_index_x),
                     host_depth_source_tile_pixel_x));
             spv::Id host_depth_source_pixel_y_int = builder.createUnaryOp(
                 spv::OpBitcast, type_int,
                 builder.createBinOp(
                     spv::OpIAdd, type_uint,
-                    builder.createBinOp(spv::OpIMul, type_uint,
-                                        builder.makeUintConstant(tile_height_samples >>
-                                                                 uint32_t(key.source_msaa_samples >=
-                                                                          xenos::MsaaSamples::k2X)),
-                                        host_depth_source_tile_index_y),
+                    builder.createBinOp(
+                        spv::OpIMul, type_uint,
+                        builder.makeUintConstant(host_depth_source_tile_height_pixels),
+                        host_depth_source_tile_index_y),
                     host_depth_source_tile_pixel_y));
             // Load the host depth source.
             spv::Builder::TextureParameters host_depth_source_texture_parameters = {};
