@@ -567,6 +567,15 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Temporary storage with reusable memory for writing image and sampler
   // descriptors.
   std::vector<VkDescriptorImageInfo> descriptor_write_image_info_;
+  // The texture and sampler bindings last written to the vertex [0] and pixel
+  // [1] shader descriptor sets, valid while the set's bit in
+  // current_graphics_descriptor_set_values_up_to_date_ is.
+  struct WrittenTextureBindings {
+    uint32_t texture_count = 0;
+    uint32_t sampler_count = 0;
+    std::vector<VkDescriptorImageInfo> image_infos;
+  };
+  WrittenTextureBindings texture_bindings_written_[2];
 
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
 

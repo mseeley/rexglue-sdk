@@ -6592,44 +6592,24 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     sampler_count_pixel = 0;
     texture_count_pixel = 0;
   }
-  // TODO(Triang3l): Reuse texture and sampler bindings if not changed.
-  current_graphics_descriptor_set_values_up_to_date_ &=
-      ~((UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex) |
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
-
-  // Make sure new descriptor sets are bound to the command buffer.
-
-  current_graphics_descriptor_sets_bound_up_to_date_ &=
-      current_graphics_descriptor_set_values_up_to_date_;
-
-  // Fill the texture and sampler write image infos.
-
-  bool write_vertex_textures =
-      (texture_count_vertex || sampler_count_vertex) &&
-      !(current_graphics_descriptor_set_values_up_to_date_ &
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex));
-  bool write_pixel_textures =
-      (texture_count_pixel || sampler_count_pixel) &&
-      !(current_graphics_descriptor_set_values_up_to_date_ &
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+  // Fill the texture and sampler image infos of both stages. A stage's
+  // descriptor set is written only if they differ from the ones last written
+  // for it in this frame, whose set is still current (transient sets live
+  // until the frame is completed, and the bits are reset at frame start).
   descriptor_write_image_info_.clear();
-  descriptor_write_image_info_.reserve(
-      (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-      (write_pixel_textures ? texture_count_pixel + sampler_count_pixel : 0));
+  descriptor_write_image_info_.reserve(texture_count_vertex + sampler_count_vertex +
+                                       texture_count_pixel + sampler_count_pixel);
   size_t vertex_texture_image_info_offset = descriptor_write_image_info_.size();
-  if (write_vertex_textures && texture_count_vertex) {
-    for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
-      VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-      descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
-          texture_binding.fetch_constant, texture_binding.dimension,
-          bool(texture_binding.is_signed));
-      descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
-                                              ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                              : VK_IMAGE_LAYOUT_UNDEFINED;
-    }
+  for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
+    VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
+    descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
+        texture_binding.fetch_constant, texture_binding.dimension, bool(texture_binding.is_signed));
+    descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
+                                            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                            : VK_IMAGE_LAYOUT_UNDEFINED;
   }
   size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
-  if (write_vertex_textures && sampler_count_vertex) {
+  if (sampler_count_vertex) {
     for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
          current_samplers_vertex_) {
       VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
@@ -6637,7 +6617,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     }
   }
   size_t pixel_texture_image_info_offset = descriptor_write_image_info_.size();
-  if (write_pixel_textures && texture_count_pixel) {
+  if (texture_count_pixel) {
     for (const VulkanShader::TextureBinding& texture_binding : *textures_pixel) {
       VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
       descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
@@ -6649,13 +6629,46 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     }
   }
   size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
-  if (write_pixel_textures && sampler_count_pixel) {
+  if (sampler_count_pixel) {
     for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
          current_samplers_pixel_) {
       VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
       descriptor_image_info.sampler = sampler_pair.second;
     }
   }
+  auto texture_bindings_written = [&](bool is_vertex, uint32_t texture_count,
+                                      uint32_t sampler_count, size_t image_info_offset) {
+    uint32_t descriptor_set = is_vertex ? SpirvShaderTranslator::kDescriptorSetTexturesVertex
+                                        : SpirvShaderTranslator::kDescriptorSetTexturesPixel;
+    const WrittenTextureBindings& written = texture_bindings_written_[is_vertex ? 0 : 1];
+    return (current_graphics_descriptor_set_values_up_to_date_ &
+            (UINT32_C(1) << descriptor_set)) &&
+           written.texture_count == texture_count && written.sampler_count == sampler_count &&
+           !std::memcmp(written.image_infos.data(),
+                        descriptor_write_image_info_.data() + image_info_offset,
+                        sizeof(VkDescriptorImageInfo) * (texture_count + sampler_count));
+  };
+  bool write_vertex_textures =
+      (texture_count_vertex || sampler_count_vertex) &&
+      !texture_bindings_written(true, texture_count_vertex, sampler_count_vertex,
+                                vertex_texture_image_info_offset);
+  bool write_pixel_textures =
+      (texture_count_pixel || sampler_count_pixel) &&
+      !texture_bindings_written(false, texture_count_pixel, sampler_count_pixel,
+                                pixel_texture_image_info_offset);
+  if (write_vertex_textures) {
+    current_graphics_descriptor_set_values_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
+  }
+  if (write_pixel_textures) {
+    current_graphics_descriptor_set_values_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
+  }
+
+  // Make sure new descriptor sets are bound to the command buffer.
+
+  current_graphics_descriptor_sets_bound_up_to_date_ &=
+      current_graphics_descriptor_set_values_up_to_date_;
 
   // Write the new descriptor sets.
 
@@ -6736,6 +6749,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
         write_textures[0].dstSet;
+    WrittenTextureBindings& written = texture_bindings_written_[0];
+    written.texture_count = texture_count_vertex;
+    written.sampler_count = sampler_count_vertex;
+    written.image_infos.assign(
+        descriptor_write_image_info_.begin() + vertex_texture_image_info_offset,
+        descriptor_write_image_info_.begin() + pixel_texture_image_info_offset);
   }
   // Pixel shader textures and samplers.
   if (write_pixel_textures) {
@@ -6753,6 +6772,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
         write_textures[0].dstSet;
+    WrittenTextureBindings& written = texture_bindings_written_[1];
+    written.texture_count = texture_count_pixel;
+    written.sampler_count = sampler_count_pixel;
+    written.image_infos.assign(
+        descriptor_write_image_info_.begin() + pixel_texture_image_info_offset,
+        descriptor_write_image_info_.end());
   }
   // Write.
   if (write_descriptor_set_count) {
