@@ -1613,7 +1613,14 @@ std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t
   // written, try the start that pointer implies (give or take the copy's
   // unrolling) and keep one whose bytes hash to the shader's.
   std::string sources;
+  std::string registers_text;
   auto* thread_state = rex::runtime::ThreadState::Get();
+  if (thread_state) {
+    PPCContext* ctx = thread_state->context();
+    registers_text = fmt::format(
+        ", r3 {:08X} r4 {:08X} r5 {:08X} r21 {:08X} r23 {:08X} r31 {:08X}", ctx->r3.u32,
+        ctx->r4.u32, ctx->r5.u32, ctx->r21.u32, ctx->r23.u32, ctx->r31.u32);
+  }
   if (fault.pc && thread_state) {
     PPCContext* ctx = thread_state->context();
     const PPCRegister* registers[] = {&ctx->r3,  &ctx->r4,  &ctx->r5,  &ctx->r6,  &ctx->r7,
@@ -1673,9 +1680,9 @@ std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t
   }
   REXGPU_INFO(
       "shader_origins: write to {:08X} (physical pages {:08X}+{:X}) by {}, callers {}, "
-      "sources{}, shaders{}",
+      "sources{}, shaders{}{}",
       guest_address, physical_start, length, writer, GuestCallers(memory),
-      sources.empty() ? " none" : sources, hashes);
+      sources.empty() ? " none" : sources, hashes, registers_text);
   return {0, UINT32_MAX};
 }
 
