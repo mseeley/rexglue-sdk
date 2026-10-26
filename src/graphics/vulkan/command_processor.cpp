@@ -79,8 +79,18 @@ std::vector<std::pair<uint32_t, uint32_t>> debug_frame_resolves;
 }  // namespace
 
 REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
-                    "When async shader compilation is enabled, skip presenting frames that "
-                    "used placeholder pipelines to avoid visible flashing")
+                    "When async shader compilation is enabled, don't present frames with draws "
+                    "skipped while their shaders or pipelines are created: the previous frame "
+                    "stays on screen instead")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(vulkan_async_skip_incomplete_frames_max_ms, 200, "GPU/Vulkan",
+                     "With vulkan_async_skip_incomplete_frames, present incomplete frames "
+                     "anyway once frames have been held back for this long (milliseconds; "
+                     "negative is 0)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(vulkan_log_skipped_draws, false, "GPU/Vulkan",
+                    "Log every frame with draws skipped while shaders or pipelines are created, "
+                    "with what they waited for, and whether the frame was held or presented")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
@@ -2349,16 +2359,38 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     return;
   }
 
-  bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
-                                            REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
-                                            frame_used_async_placeholder_pipeline_;
-  if (skip_present_due_async_placeholder) {
-    static bool skipped_incomplete_frame_logged = false;
-    if (!skipped_incomplete_frame_logged) {
-      skipped_incomplete_frame_logged = true;
-      REXGPU_WARN(
-          "Skipping Vulkan frame presentation due to async placeholder draw "
-          "usage in this frame");
+  bool hold_incomplete_frame = REXCVAR_GET(async_shader_compilation) &&
+                               REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+                               frame_skipped_draws_ != 0;
+  // Don't hold the last complete frame on screen for long: a new area may
+  // keep the creation threads busy for seconds.
+  if (hold_incomplete_frame) {
+    auto now = std::chrono::steady_clock::now();
+    if (!incomplete_frames_since_) {
+      incomplete_frames_since_ = now;
+    } else if (now - *incomplete_frames_since_ >=
+               std::chrono::milliseconds(
+                   std::max(REXCVAR_GET(vulkan_async_skip_incomplete_frames_max_ms), 0))) {
+      hold_incomplete_frame = false;
+    }
+  } else if (!frame_skipped_draws_) {
+    incomplete_frames_since_.reset();
+  }
+  if (frame_skipped_draws_ && REXCVAR_GET(vulkan_log_skipped_draws)) {
+    REXGPU_INFO(
+        "Vulkan: frame with {} of {} draws skipped while shaders or pipelines are created ({} "
+        "for vertex shaders, {} for pixel shaders, {} for pipelines): {}",
+        frame_skipped_draws_, frame_draws_, frame_skipped_draws_vertex_shader_,
+        frame_skipped_draws_pixel_shader_, frame_skipped_draws_pipeline_,
+        hold_incomplete_frame ? "held" : "presented");
+  }
+  if (hold_incomplete_frame) {
+    static bool held_incomplete_frame_logged = false;
+    if (!held_incomplete_frame_logged) {
+      held_incomplete_frame_logged = true;
+      REXGPU_INFO(
+          "Vulkan: holding back frames with draws skipped while shaders or pipelines are "
+          "created (logged once)");
     }
     EndSubmission(true);
     return;
@@ -3667,6 +3699,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
+  ++frame_draws_;
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -3852,9 +3885,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
             vertex_shader->writes_interpolators());
       }
     }
-    if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
-                                                  pixel_shader_translation)) {
+    bool shader_translation_pending;
+    if (!pipeline_cache_->RequestShadersTranslated(
+            vertex_shader_translation, pixel_shader_translation, shader_translation_pending)) {
       return draw_fail("shader_translation");
+    }
+    if (shader_translation_pending) {
+      // Translating on a creation thread - skip the draw.
+      ++frame_skipped_draws_;
+      if (!vertex_shader_translation->is_translated()) {
+        ++frame_skipped_draws_vertex_shader_;
+      }
+      if (pixel_shader_translation && !pixel_shader_translation->is_translated()) {
+        ++frame_skipped_draws_pixel_shader_;
+      }
+      return true;
     }
 
     // Obtain the samplers. Note that the bindings don't depend on the shader
@@ -3959,13 +4004,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     return draw_fail("configure_pipeline");
   }
   draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawPipelineConfigureUs);
-  bool pipeline_is_placeholder = false;
-  // Reload the current handle state to observe async hot-swap completions that
-  // may happen between pipeline configuration and binding.
+  bool pipeline_creation_pending = false;
+  // Reload the current handle state to observe a creation thread finishing
+  // between pipeline configuration and binding.
   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
-                                                &pipeline_is_placeholder);
-  if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
-    frame_used_async_placeholder_pipeline_ = true;
+                                                &pipeline_creation_pending);
+  if (REXCVAR_GET(async_shader_compilation) && pipeline_creation_pending) {
+    // Being created on a creation thread - skip the draw.
+    ++frame_skipped_draws_;
+    ++frame_skipped_draws_pipeline_;
     return true;
   }
   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
@@ -5406,7 +5453,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
 
   if (is_opening_frame) {
     frame_open_ = true;
-    frame_used_async_placeholder_pipeline_ = false;
+    frame_draws_ = 0;
+    frame_skipped_draws_ = 0;
+    frame_skipped_draws_vertex_shader_ = 0;
+    frame_skipped_draws_pixel_shader_ = 0;
+    frame_skipped_draws_pipeline_ = 0;
 
     // Reset bindings that depend on transient data.
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));

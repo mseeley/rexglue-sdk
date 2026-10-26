@@ -11,11 +11,13 @@
  */
 
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -537,10 +539,18 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   static constexpr uint32_t kMaxFramesInFlight = 3;
   bool frame_open_ = false;
-  // Tracks whether any draw in the current frame used an async placeholder
-  // graphics pipeline and may have produced incomplete output.
-  bool frame_used_async_placeholder_pipeline_ = false;
   bool renderdoc_capturing_ = false;
+  // Draws in the current frame, and of them, those skipped while their shaders
+  // or pipeline are created on the creation threads.
+  uint32_t frame_draws_ = 0;
+  uint32_t frame_skipped_draws_ = 0;
+  // Of the skipped draws, those waiting for a translation of their vertex or
+  // pixel shader (a draw may wait for both), and those waiting for a pipeline.
+  uint32_t frame_skipped_draws_vertex_shader_ = 0;
+  uint32_t frame_skipped_draws_pixel_shader_ = 0;
+  uint32_t frame_skipped_draws_pipeline_ = 0;
+  // When frames with skipped draws started being held back, if they are.
+  std::optional<std::chrono::steady_clock::time_point> incomplete_frames_since_;
   // Guest frame index, since some transient resources can be reused across
   // submissions. Values updated in the beginning of a frame.
   uint64_t frame_current_ = 1;
