@@ -79,6 +79,23 @@ class IGraphicsSystem {
     (void)blocking;
   }
 
+  // A pixel shader the guest has placed in memory, with the registers its
+  // draws will set, from the guest's own shader object. The backend may
+  // translate it before its first draw, so that draw doesn't wait. Any
+  // thread. Default: ignored.
+  struct PixelShaderPretranslation {
+    // Guest virtual address and size of the microcode as its IM_LOAD will
+    // load it.
+    uint32_t guest_address;
+    uint32_t dword_count;
+    uint32_t sq_program_cntl;
+    uint32_t sq_context_misc;
+    uint32_t sq_interpolator_cntl;
+  };
+  virtual void PretranslatePixelShader(const PixelShaderPretranslation& pretranslation) {
+    (void)pretranslation;
+  }
+
   // One-shot convenience for callers that don't care about the split.
   X_STATUS Setup(runtime::FunctionDispatcher* function_dispatcher, KernelState* kernel_state,
                  ui::WindowedAppContext* app_context, bool with_presentation) {
