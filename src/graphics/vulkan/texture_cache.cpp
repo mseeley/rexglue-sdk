@@ -16,6 +16,7 @@
 #include <utility>
 
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/bit.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -1215,6 +1216,8 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
 
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                bool load_mips) {
+  rex::perf::frame_stats::ScopedTimer load_timer(rex::perf::frame_stats::Stat::kTextureLoadUs,
+                                                 rex::perf::frame_stats::Stat::kTextureLoads);
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
 

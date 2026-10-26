@@ -13,11 +13,17 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <mutex>
 #include <string_view>
+#include <thread>
+#include <unordered_set>
+#include <vector>
 
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/dbg.h>
 #include <rex/perf/counter.h>
 #include <rex/chrono/clock.h>
@@ -29,13 +35,18 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/hash.h>
 #include <rex/memory.h>
+#include <rex/system/thread_state.h>
 #include <rex/memory/ring_buffer.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+REXCVAR_DEFINE_STRING(log_shader_origins_watch, "", "Perf",
+                      "File of \"hash virtual_address dwords\" lines (hex): poll those guest "
+                      "addresses every 20 ms and log when each shader's microcode is there");
 
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
@@ -216,6 +227,7 @@ void CommandProcessor::WorkerThreadMain() {
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
+      rex::perf::frame_stats::ScopedTimer idle_timer(rex::perf::frame_stats::Stat::kCpIdleUs);
       PrepareForWait();
       uint32_t loop_count = 0;
       do {
@@ -341,6 +353,7 @@ uint32_t CommandProcessor::ReadRegisterValue(uint32_t index) const {
 }
 
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpRegisterWrites, 1);
   RegisterFile& regs = *register_file_;
   if (index >= RegisterFile::kRegisterCount) {
     auto [it, inserted] = extended_register_values_.insert_or_assign(index, value);
@@ -663,6 +676,7 @@ void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
 }
 
 bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpPackets, 1);
   const uint32_t packet = reader->ReadAndSwap<uint32_t>();
   const uint32_t packet_type = packet >> 30;
   if (packet == 0) {
@@ -919,6 +933,8 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, 
   for (int n = 0; n < 6; n++) {
     if (cpu_mask & (1 << n)) {
       if (graphics_system_) {
+        rex::perf::frame_stats::NoteTimeline(
+            rex::perf::frame_stats::TimelineEvent::kCpInterrupt);
         graphics_system_->DispatchInterruptCallback(1, n);
       }
     }
@@ -929,6 +945,7 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, 
 bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
+  rex::perf::frame_stats::NoteTimeline(rex::perf::frame_stats::TimelineEvent::kCpSwap);
 
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
   {
@@ -944,6 +961,27 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   }
 #endif
   rex::perf::Profiler::Flip();
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpSwaps, 1);
+  if (rex::perf::frame_stats::enabled()) {
+    // The command processor's CPU time since its previous swap, to compare
+    // with its wall time (not idle and not waiting).
+    // Its context switches tell being preempted apart from waiting.
+    static uint64_t last_cpu_us = 0;
+    static rex::perf::frame_stats::ThreadUsage last_usage;
+    uint64_t cpu_us = rex::perf::frame_stats::ThreadCpuUs();
+    rex::perf::frame_stats::ThreadUsage usage = rex::perf::frame_stats::GetThreadUsage();
+    if (last_cpu_us) {
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpCpuUs, cpu_us - last_cpu_us);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpSysUs,
+                                  usage.sys_us - last_usage.sys_us);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpPreempts,
+                                  usage.preempts - last_usage.preempts);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpBlocks,
+                                  usage.blocks - last_usage.blocks);
+    }
+    last_cpu_us = cpu_us;
+    last_usage = usage;
+  }
 
   // Xenia-specific VdSwap hook.
   // VdSwap will post this to tell us we need to swap the screen/fire an
@@ -989,6 +1027,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
 
   bool is_memory = (wait_info & 0x10) != 0;
 
+  rex::perf::frame_stats::ScopedTimer wait_timer(rex::perf::frame_stats::Stat::kCpWaitUs);
+  const bool note_wait = rex::perf::frame_stats::cp_waits();
+  const uint64_t note_start_us = note_wait ? rex::perf::frame_stats::NowUs() : 0;
+  uint32_t polls = 0, sleeps = 0, last_value = 0;
   bool matched = false;
   do {
     uint32_t value = 0;
@@ -1003,6 +1045,8 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
         value = ReadRegisterValue(poll_reg_addr);
       }
     }
+    ++polls;
+    last_value = value;
     switch (wait_info & 0x7) {
       case 0x0:  // Never.
         matched = false;
@@ -1032,6 +1076,11 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
     if (!matched) {
       // Wait.
       if (wait >= 0x100) {
+        if (!sleeps) {
+          rex::perf::frame_stats::NoteTimeline(
+              rex::perf::frame_stats::TimelineEvent::kCpWaitStart);
+        }
+        ++sleeps;
         PrepareForWait();
         if (!REXCVAR_GET(vsync)) {
           // User wants it fast and dangerous.
@@ -1051,6 +1100,14 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       }
     }
   } while (!matched);
+  if (sleeps) {
+    rex::perf::frame_stats::NoteTimeline(rex::perf::frame_stats::TimelineEvent::kCpWaitEnd);
+  }
+  if (note_wait) {
+    rex::perf::frame_stats::NoteCpWait({is_memory, poll_reg_addr, wait_info & 0x7, ref, mask, wait},
+                                       rex::perf::frame_stats::NowUs() - note_start_us, polls,
+                                       sleeps, last_value);
+  }
 
   return true;
 }
@@ -1511,6 +1568,255 @@ bool CommandProcessor::ExecutePacketType3_SET_SHADER_CONSTANTS(memory::RingBuffe
   return true;
 }
 
+#if (REX_PLATFORM_LINUX && !REX_PLATFORM_PS5) || defined(__APPLE__)
+#include <dlfcn.h>
+#define REX_SHADER_ORIGINS_DLADDR 1
+#endif
+
+namespace {
+
+// log_shader_origins_watch: when each listed shader's microcode is complete in
+// guest memory, and which guest code writes it there. Started at the first
+// IM_LOAD, after the game has set up the memory its shaders live in.
+struct ShaderOriginsWatched {
+  uint64_t hash;
+  uint32_t address;  // guest virtual
+  uint32_t physical;
+  uint32_t size;
+};
+std::mutex shader_origins_mutex;
+std::vector<ShaderOriginsWatched> shader_origins_pending;
+
+// The guest call stack of the current thread: its link register, then the
+// saved link registers up the back chain, through readable pages only.
+std::string GuestCallers(memory::Memory* memory) {
+  auto* thread_state = rex::runtime::ThreadState::Get();
+  if (!thread_state) {
+    return "(not a guest thread)";
+  }
+  PPCContext* ctx = thread_state->context();
+  auto readable = [memory](uint32_t address) {
+    memory::BaseHeap* heap = memory->LookupHeap(address);
+    uint32_t protect = 0;
+    return heap && heap->QueryProtect(address, &protect) && (protect & memory::kMemoryProtectRead);
+  };
+  std::string callers = fmt::format("{:08X}", uint32_t(ctx->lr));
+  uint32_t frame = ctx->r1.u32;
+  for (int i = 0; i < 8 && frame; ++i) {
+    if (!readable(frame)) {
+      break;
+    }
+    uint32_t back = memory::load_and_swap<uint32_t>(memory->TranslateVirtual(frame));
+    if (back <= frame || !readable(back - 8)) {
+      break;
+    }
+    callers +=
+        fmt::format(" {:08X}", memory::load_and_swap<uint32_t>(memory->TranslateVirtual(back - 8)));
+    frame = back;
+  }
+  return callers;
+}
+
+// Runs with the global lock held, on the thread that wrote (or read a file).
+std::pair<uint32_t, uint32_t> ShaderOriginsWriteCallback(void* context, uint32_t physical_start,
+                                                         uint32_t length, bool exact_range) {
+  auto* memory = static_cast<memory::Memory*>(context);
+  std::string hashes;
+  std::vector<ShaderOriginsWatched> hit;
+  {
+    std::lock_guard<std::mutex> lock(shader_origins_mutex);
+    for (const ShaderOriginsWatched& watched : shader_origins_pending) {
+      if (watched.physical < physical_start + length &&
+          physical_start < watched.physical + watched.size) {
+        hashes += fmt::format(" {:016X}", watched.hash);
+        hit.push_back(watched);
+      }
+    }
+  }
+  if (hashes.empty()) {
+    return {0, UINT32_MAX};
+  }
+  const auto& fault = rex::perf::frame_stats::CurrentWriteFault();
+  std::string writer = "no CPU write fault (a file read or another kernel path)";
+  uint32_t guest_address = 0;
+  if (fault.pc) {
+    writer = fmt::format("host pc {:X}", fault.pc);
+#ifdef REX_SHADER_ORIGINS_DLADDR
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(fault.pc), &info) && info.dli_fname) {
+      std::string_view module = info.dli_fname;
+      module = module.substr(module.find_last_of('/') + 1);
+      writer = fmt::format("{}+{:X}", module, fault.pc - uintptr_t(info.dli_fbase));
+    }
+#endif
+    guest_address = memory->HostToGuestVirtual(reinterpret_cast<void*>(fault.host_address));
+  }
+  // If this write is a copy, find its source: a register of the writing
+  // thread holds the copy's current source pointer, so for each shader being
+  // written, try the start that pointer implies (give or take the copy's
+  // unrolling) and keep one whose bytes hash to the shader's.
+  std::string sources;
+  std::string registers_text;
+  auto* thread_state = rex::runtime::ThreadState::Get();
+  if (thread_state) {
+    PPCContext* ctx = thread_state->context();
+    registers_text = fmt::format(
+        ", r3 {:08X} r4 {:08X} r5 {:08X} r21 {:08X} r23 {:08X} r31 {:08X}", ctx->r3.u32,
+        ctx->r4.u32, ctx->r5.u32, ctx->r21.u32, ctx->r23.u32, ctx->r31.u32);
+    // The bytes the late copy (source r21, size r23) is copying, when small,
+    // to compare with the microcode once complete.
+    uint32_t copy_source = ctx->r21.u32, copy_size = ctx->r23.u32;
+    memory::BaseHeap* heap = memory->LookupHeap(copy_source);
+    uint32_t protect = 0;
+    if (copy_size && copy_size <= 512 && !(copy_size & 3) && heap &&
+        heap->QueryProtect(copy_source, &protect) && (protect & memory::kMemoryProtectRead)) {
+      registers_text += ", copy source bytes";
+      const uint8_t* bytes = memory->TranslateVirtual<const uint8_t*>(copy_source);
+      for (uint32_t i = 0; i < copy_size; i += 4) {
+        registers_text += fmt::format(" {:02X}{:02X}{:02X}{:02X}", bytes[i], bytes[i + 1],
+                                      bytes[i + 2], bytes[i + 3]);
+      }
+    }
+  }
+  if (fault.pc && thread_state) {
+    PPCContext* ctx = thread_state->context();
+    const PPCRegister* registers[] = {&ctx->r3,  &ctx->r4,  &ctx->r5,  &ctx->r6,  &ctx->r7,
+                                      &ctx->r8,  &ctx->r9,  &ctx->r10, &ctx->r11, &ctx->r12,
+                                      &ctx->r28, &ctx->r29, &ctx->r30, &ctx->r31};
+    auto readable = [memory](uint32_t address) {
+      memory::BaseHeap* heap = memory->LookupHeap(address);
+      uint32_t protect = 0;
+      return heap && heap->QueryProtect(address, &protect) &&
+             (protect & memory::kMemoryProtectRead);
+    };
+    for (const ShaderOriginsWatched& watched : hit) {
+      if (guest_address < watched.address || guest_address >= watched.address + watched.size) {
+        continue;
+      }
+      uint32_t offset = guest_address - watched.address;
+      bool found = false;
+      for (const PPCRegister* reg : registers) {
+        for (int32_t slack = -256; slack <= 256 && !found; slack += 4) {
+          uint32_t start = reg->u32 - offset + uint32_t(slack);
+          if (start == watched.address || !readable(start) ||
+              !readable(start + watched.size - 1)) {
+            continue;
+          }
+          if (XXH3_64bits(memory->TranslateVirtual(start), watched.size) == watched.hash) {
+            sources += fmt::format(" {:016X}@{:08X}", watched.hash, start);
+            found = true;
+          }
+        }
+        if (found) {
+          break;
+        }
+      }
+      // Or the registers still hold the whole copy's destination and source
+      // starts (the recompiled copy may keep its moving pointers in host
+      // registers): the source is the source start plus the shader's offset
+      // into the destination.
+      for (const PPCRegister* destination : registers) {
+        if (found || destination->u32 > watched.address ||
+            watched.address - destination->u32 >= (16u << 20)) {
+          continue;
+        }
+        for (const PPCRegister* source : registers) {
+          uint32_t start = source->u32 + (watched.address - destination->u32);
+          if (source == destination || start == watched.address || !readable(start) ||
+              !readable(start + watched.size - 1)) {
+            continue;
+          }
+          if (XXH3_64bits(memory->TranslateVirtual(start), watched.size) == watched.hash) {
+            sources += fmt::format(" {:016X}@{:08X}", watched.hash, start);
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+  REXGPU_INFO(
+      "shader_origins: write to {:08X} (physical pages {:08X}+{:X}) by {}, callers {}, "
+      "sources{}, shaders{}{}",
+      guest_address, physical_start, length, writer, GuestCallers(memory),
+      sources.empty() ? " none" : sources, hashes, registers_text);
+  return {0, UINT32_MAX};
+}
+
+void StartShaderOriginsWatch(memory::Memory* memory) {
+  static std::once_flag started;
+  std::call_once(started, [memory]() {
+    const std::string& path = REXCVAR_GET(log_shader_origins_watch);
+    if (path.empty()) {
+      return;
+    }
+    std::ifstream file(path);
+    std::string hash, address, dwords;
+    {
+      std::lock_guard<std::mutex> lock(shader_origins_mutex);
+      while (file >> hash >> address >> dwords) {
+        uint32_t virtual_address = uint32_t(std::stoul(address, nullptr, 16));
+        shader_origins_pending.push_back({std::stoull(hash, nullptr, 16), virtual_address,
+                                          memory->GetPhysicalAddress(virtual_address),
+                                          uint32_t(std::stoul(dwords, nullptr, 16)) * 4});
+      }
+      REXGPU_INFO("shader_origins: watching {} shaders from {}", shader_origins_pending.size(),
+                  path);
+    }
+    memory->RegisterPhysicalMemoryInvalidationCallback(ShaderOriginsWriteCallback, memory);
+    std::thread([memory]() {
+      auto readable = [memory](uint32_t address) {
+        memory::BaseHeap* heap = memory->LookupHeap(address);
+        uint32_t protect = 0;
+        return heap && heap->QueryProtect(address, &protect) &&
+               (protect & memory::kMemoryProtectRead);
+      };
+      while (true) {
+        std::vector<ShaderOriginsWatched> pending;
+        {
+          std::lock_guard<std::mutex> lock(shader_origins_mutex);
+          pending = shader_origins_pending;
+        }
+        if (pending.empty()) {
+          break;
+        }
+        std::vector<uint64_t> present;
+        for (const ShaderOriginsWatched& watched : pending) {
+          if (readable(watched.address) && readable(watched.address + watched.size - 1) &&
+              XXH3_64bits(memory->TranslateVirtual(watched.address), watched.size) ==
+                  watched.hash) {
+            std::string bytes_text;
+            if (watched.size <= 512) {
+              const uint8_t* bytes = memory->TranslateVirtual<const uint8_t*>(watched.address);
+              for (uint32_t i = 0; i < watched.size; i += 4) {
+                bytes_text += fmt::format(" {:02X}{:02X}{:02X}{:02X}", bytes[i], bytes[i + 1],
+                                          bytes[i + 2], bytes[i + 3]);
+              }
+            }
+            REXGPU_INFO("shader_origins: microcode {:016X} present at {:08X}{}{}", watched.hash,
+                        watched.address, bytes_text.empty() ? "" : ", bytes", bytes_text);
+            present.push_back(watched.hash);
+          } else {
+            // Catch the next write to it. A write unprotects the whole page,
+            // so this re-arms after each one, 20 ms apart at most.
+            memory->EnablePhysicalMemoryAccessCallbacks(watched.physical, watched.size, true,
+                                                        false);
+          }
+        }
+        if (!present.empty()) {
+          std::lock_guard<std::mutex> lock(shader_origins_mutex);
+          std::erase_if(shader_origins_pending, [&](const ShaderOriginsWatched& watched) {
+            return std::find(present.begin(), present.end(), watched.hash) != present.end();
+          });
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+    }).detach();
+  });
+}
+
+}  // namespace
+
 bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
@@ -1526,6 +1832,15 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, ui
 
   auto shader =
       LoadShader(shader_type, addr, memory_->TranslatePhysical<uint32_t*>(addr), size_dwords);
+  if (shader && rex::perf::frame_stats::log_shader_origins()) {
+    StartShaderOriginsWatch(memory_);
+    static std::unordered_set<const Shader*> logged_shaders;
+    if (logged_shaders.insert(shader).second) {
+      REXGPU_INFO("shader_origins: first IM_LOAD {} {:016X} at physical {:08X}, {} dwords",
+                  shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
+                  shader->ucode_data_hash(), addr, size_dwords);
+    }
+  }
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;
@@ -1556,6 +1871,14 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD_IMMEDIATE(memory::RingBuffer* 
   assert_true(count - 2 >= size_dwords);
   auto shader = LoadShader(shader_type, uint32_t(reader->read_ptr()),
                            reinterpret_cast<uint32_t*>(reader->read_ptr()), size_dwords);
+  if (shader && rex::perf::frame_stats::log_shader_origins()) {
+    static std::unordered_set<const Shader*> logged_shaders;
+    if (logged_shaders.insert(shader).second) {
+      REXGPU_INFO("shader_origins: first IM_LOAD_IMMEDIATE {} {:016X}, {} dwords",
+                  shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
+                  shader->ucode_data_hash(), size_dwords);
+    }
+  }
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;

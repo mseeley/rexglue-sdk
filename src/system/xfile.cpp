@@ -10,6 +10,7 @@
  */
 
 #include <rex/filesystem/vfs.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/memory.h>
@@ -155,6 +156,8 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address, uint32_t buffer_leng
                                         memory::PageAccess::kReadWrite) {
           result = X_STATUS_ACCESS_VIOLATION;
         } else {
+          rex::perf::frame_stats::ScopedTimer read_timer(rex::perf::frame_stats::Stat::kFileReadUs,
+                                                         rex::perf::frame_stats::Stat::kFileReads);
           result = file_->ReadSync(
               std::span<uint8_t>(
                   buffer_physical_heap
@@ -164,6 +167,15 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address, uint32_t buffer_leng
                   buffer_length),
               size_t(byte_offset), &bytes_read);
           if (XSUCCEEDED(result)) {
+            rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kFileReadBytes, bytes_read);
+            if (rex::perf::frame_stats::log_shader_origins()) {
+              REXSYS_INFO(
+                  "shader_origins: read {} offset {:X} length {:X} to {:08X} (physical {:08X})",
+                  path(), byte_offset, bytes_read, buffer_guest_address,
+                  buffer_physical_heap
+                      ? buffer_physical_heap->GetPhysicalAddress(buffer_guest_address)
+                      : 0xFFFFFFFFu);
+            }
             if (buffer_physical_heap) {
               buffer_physical_heap->TriggerCallbacks(
                   rex::thread::global_critical_region::AcquireDirect(), buffer_guest_address,

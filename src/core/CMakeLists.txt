@@ -7,6 +7,7 @@ add_library(rexcore OBJECT
     bit_stream.cpp
     byte_stream.cpp
     clock.cpp
+    perf/frame_stats.cpp
     cvar.cpp
     exception_handler.cpp
     filesystem.cpp

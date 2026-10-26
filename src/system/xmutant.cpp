@@ -10,6 +10,7 @@
  */
 
 #include <rex/logging.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmutant.h>
@@ -45,6 +46,7 @@ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon, bool 
 
   // TODO(benvanik): abandoning.
   assert_false(abandon);
+  rex::perf::frame_stats::NoteSignal(this);
   if (mutant_->Release()) {
     return X_STATUS_SUCCESS;
   } else {

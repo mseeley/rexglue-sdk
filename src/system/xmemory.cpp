@@ -20,6 +20,7 @@
 #include <fmt/format.h>
 
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -533,6 +534,8 @@ runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
 
 bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
                                      void* host_address, bool is_write) {
+  rex::perf::frame_stats::ScopedTimer fault_timer(rex::perf::frame_stats::Stat::kAccessFaultUs,
+                                                  rex::perf::frame_stats::Stat::kAccessFaults);
   // Access via physical_membase_ is special, when need to bypass everything
   // (for instance, for a data provider to actually write the data) so only
   // triggering callbacks on virtual memory regions.

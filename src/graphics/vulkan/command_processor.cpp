@@ -13,17 +13,20 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iterator>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include <SPIRV/GlslangToSpv.h>
 #include <glslang/Public/ShaderLang.h>
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
@@ -43,6 +46,7 @@
 #include <rex/types.h>
 #include <rex/memory/utils.h>
 #include <rex/ui/flags.h>
+#include <rex/ui/renderdoc_api.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
 
@@ -54,6 +58,25 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
 REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                     "Read data written by memory export in shaders on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(vulkan_invalidate_textures_every_frame, false, "GPU/Vulkan",
+                    "Reload every texture from guest memory each frame (debugging CPU write "
+                    "tracking; slow)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(vulkan_log_resolves, false, "GPU/Vulkan",
+                    "Log every resolve destination and the swap source address (debugging)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(renderdoc_capture_trigger_file, "", "GPU/Vulkan",
+                      "When this file exists, capture the next guest frame (swap to swap) in "
+                      "RenderDoc and delete the file. Needs the RenderDoc layer loaded")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+namespace {
+// Resolves of the current frame, for vulkan_log_resolves.
+std::vector<std::pair<uint32_t, uint32_t>> debug_frame_resolves;
+}  // namespace
 
 REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                     "When async shader compilation is enabled, skip presenting frames that "
@@ -1905,6 +1928,10 @@ void VulkanCommandProcessor::ShutdownContext() {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyQueryPool, device,
+                                         gpu_timestamp_query_pool_);
+  gpu_timestamps_pending_.clear();
+
   DestroyScratchBuffer();
 
   for (auto& readback_pair : readback_buffers_) {
@@ -2165,6 +2192,7 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
   if (!num_registers) {
     return;
   }
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kCpBulkRegisterWrites, num_registers);
   uint32_t end_index = start_index + num_registers - 1;
 
   auto range_has_any_constant_usage = [](const uint64_t* usage_map, uint32_t first_constant,
@@ -2269,6 +2297,37 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
 }
 
+void VulkanCommandProcessor::CaptureFrameIfTriggered() {
+#if REX_HAS_RENDERDOC
+  const std::string& trigger = REXCVAR_GET(renderdoc_capture_trigger_file);
+  if (trigger.empty())
+    return;
+  // The instance looks for RenderDoc before creating itself, which is before
+  // the Vulkan loader brings in the RenderDoc layer, so look again here.
+  static std::unique_ptr<ui::RenderDocAPI> renderdoc_late = ui::RenderDocAPI::CreateIfConnected();
+  ui::RenderDocAPI* renderdoc = GetVulkanDevice()->vulkan_instance()->renderdoc_api();
+  if (!renderdoc)
+    renderdoc = renderdoc_late.get();
+  if (!renderdoc)
+    return;
+  const RENDERDOC_API_1_0_0* api = renderdoc->api_1_0_0();
+  // Frame commands are submitted by the time of the next swap, so a capture
+  // from one swap to the next holds one whole guest frame.
+  if (renderdoc_capturing_) {
+    api->EndFrameCapture(nullptr, nullptr);
+    renderdoc_capturing_ = false;
+    REXGPU_INFO("RenderDoc: captured guest frame {}", frame_current_);
+    return;
+  }
+  std::error_code ec;
+  if (!std::filesystem::remove(trigger, ec))
+    return;
+  api->StartFrameCapture(nullptr, nullptr);
+  renderdoc_capturing_ = true;
+  REXGPU_INFO("RenderDoc: capturing guest frame {}", frame_current_);
+#endif
+}
+
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
@@ -2277,6 +2336,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 
   if (!graphics_system_)
     return;
+  CaptureFrameIfTriggered();
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
     REXGPU_ERROR("XELOG_GPU PRESENT: NO PRESENTER");
@@ -2302,6 +2362,21 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     }
     EndSubmission(true);
     return;
+  }
+
+  if (REXCVAR_GET(vulkan_log_resolves)) {
+    xenos::xe_gpu_texture_fetch_t fetch = register_file_->GetTextureFetch(0);
+    REXGPU_INFO("SWAP frame={} frontbuffer={:08X} {}x{} fetch0_base={:08X} fetch0_format={} {}x{}",
+                frame_current_, frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
+                uint32_t(fetch.base_address) << 12, uint32_t(fetch.format),
+                uint32_t(fetch.size_2d.width) + 1, uint32_t(fetch.size_2d.height) + 1);
+    if (frame_current_ % 60 == 0) {
+      bool dump = frame_current_ % 300 == 0;
+      for (const auto& [address, length] : debug_frame_resolves) {
+        LogGuestMemoryForDebugging("resolve", address, length, dump);
+      }
+    }
+    debug_frame_resolves.clear();
   }
 
   SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
@@ -2408,6 +2483,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
 
+  rex::perf::frame_stats::LapTimer output_laps;
   presenter->RefreshGuestOutput(
       guest_output_width, guest_output_height, display_width, display_height,
       [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
@@ -2923,6 +2999,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         EndSubmission(true);
         return true;
       });
+  output_laps.Lap(rex::perf::frame_stats::Stat::kCpOutputUs);
 
   // End the frame even if did not present for any reason (the image refresher
   // was not called), to prevent leaking per-frame resources.
@@ -3593,6 +3670,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kDraws, 1);
+  rex::perf::frame_stats::LapTimer draw_laps(rex::perf::frame_stats::draw_parts());
 
   const RegisterFile& regs = *register_file_;
   (void)index_buffer_info;
@@ -3753,6 +3832,26 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         pixel_shader ? static_cast<VulkanShader::VulkanTranslation*>(
                            pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value))
                      : nullptr;
+    if (rex::perf::frame_stats::log_shader_origins() && pixel_shader_translation &&
+        !pixel_shader_translation->is_translated()) {
+      // The draw state each new pixel shader translation depends on, to see
+      // which of it a shader's modification could be predicted from before
+      // its first draw. Only this thread touches the set.
+      static std::unordered_set<const void*> logged_translations;
+      if (logged_translations.insert(pixel_shader_translation).second) {
+        REXGPU_INFO(
+            "shader_origins: pixel {:016X} modification {:016X} needs SQ_PROGRAM_CNTL {:08X} "
+            "SQ_CONTEXT_MISC {:08X} SQ_INTERPOLATOR_CNTL {:08X} RB_SURFACE_INFO {:08X} "
+            "RB_COLORCONTROL {:08X} RB_DEPTHCONTROL {:08X} static bound {} vertex {:016X} "
+            "writes {:04X}",
+            pixel_shader->ucode_data_hash(), pixel_shader_modification.value,
+            regs.Get<reg::SQ_PROGRAM_CNTL>().value, regs.Get<reg::SQ_CONTEXT_MISC>().value,
+            regs.Get<reg::SQ_INTERPOLATOR_CNTL>().value, regs.Get<reg::RB_SURFACE_INFO>().value,
+            regs.Get<reg::RB_COLORCONTROL>().value, normalized_depth_control.value,
+            pixel_shader->register_static_address_bound(), vertex_shader->ucode_data_hash(),
+            vertex_shader->writes_interpolators());
+      }
+    }
     if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
                                                   pixel_shader_translation)) {
       return draw_fail("shader_translation");
@@ -3835,7 +3934,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   uint32_t used_texture_mask =
       vertex_shader->GetUsedTextureMaskAfterTranslation() |
       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawSetupUs);
   texture_cache_->RequestTextures(used_texture_mask);
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawTexturesUs);
 
   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
   // Set up the render targets - this may perform dispatches and draws.
@@ -3843,6 +3944,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                     normalized_color_mask, *vertex_shader)) {
     return draw_fail("render_target_update");
   }
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawRenderTargetsUs);
 
   // Create the pipeline (for this, need the render pass from the render target
   // cache), translating the shaders - doing this now to obtain the used
@@ -3856,6 +3958,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                           pipeline, pipeline_layout_provider, &pipeline_handle)) {
     return draw_fail("configure_pipeline");
   }
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawPipelineConfigureUs);
   bool pipeline_is_placeholder = false;
   // Reload the current handle state to observe async hot-swap completions that
   // may happen between pipeline configuration and binding.
@@ -3873,6 +3976,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     current_guest_graphics_pipeline_ = pipeline;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
   }
+
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawPipelineUs);
 
   // Update the graphics pipeline, and if the new graphics pipeline has a
   // different layout, invalidate incompatible descriptor sets before updating
@@ -3976,6 +4081,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (!UpdateBindings(vertex_shader, pixel_shader)) {
     return draw_fail("update_bindings");
   }
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawStateUs);
 
   // Ensure vertex buffers are resident.
   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
@@ -4108,6 +4214,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
   }
 
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawMemoryUs);
+
   // After all commands that may dispatch, copy or insert barriers, submit
   // the barriers (may end the render pass), and (re)enter the render pass
   // before drawing.
@@ -4153,6 +4261,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     deferred_command_buffer_.CmdVkDrawIndexed(primitive_processing_result.host_draw_vertex_count, 1,
                                               0, 0, 0);
   }
+
+  draw_laps.Lap(rex::perf::frame_stats::Stat::kCpDrawRecordUs);
 
   // Invalidate textures in memexported memory and watch for changes.
   if (!memexport_ranges_.empty()) {
@@ -4383,6 +4493,67 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
   return true;
 }
 
+void VulkanCommandProcessor::LogResolveForDebugging(bool resolved, uint32_t written_address,
+                                                    uint32_t written_length) {
+  if (!REXCVAR_GET(vulkan_log_resolves)) {
+    return;
+  }
+  auto copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+  auto copy_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+  auto copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
+  auto surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
+  // Source: color format of the selected render target, or "depth" with its
+  // format (0 = D24S8, 1 = D24FS8).
+  uint32_t src_select = copy_control.copy_src_select;
+  std::string source;
+  if (src_select < 4) {
+    auto color_info = register_file_->Get<reg::RB_COLOR_INFO>(
+        reg::RB_COLOR_INFO::rt_register_indices[src_select]);
+    source = fmt::format("color{} fmt={} base={}", src_select,
+                         uint32_t(color_info.color_format), uint32_t(color_info.color_base));
+  } else {
+    auto depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
+    source = fmt::format("depth fmt={} base={}", uint32_t(depth_info.depth_format),
+                         uint32_t(depth_info.depth_base));
+  }
+  REXGPU_INFO(
+      "RESOLVE frame={} ok={} dest={:08X} length={:X} format={} number={} {}x{} src=[{}] "
+      "msaa={} sample={} pitch={}",
+      frame_current_, resolved, written_address, written_length,
+      uint32_t(copy_dest_info.copy_dest_format), uint32_t(copy_dest_info.copy_dest_number),
+      uint32_t(copy_dest_pitch.copy_dest_pitch), uint32_t(copy_dest_pitch.copy_dest_height),
+      source, uint32_t(surface_info.msaa_samples), uint32_t(copy_control.copy_sample_select),
+      uint32_t(surface_info.surface_pitch));
+  if (resolved && written_length) {
+    debug_frame_resolves.emplace_back(written_address, written_length);
+  }
+}
+
+void VulkanCommandProcessor::LogGuestMemoryForDebugging(const char* what, uint32_t address,
+                                                        uint32_t length, bool dump) {
+  const uint8_t* data = memory_->TranslatePhysical<const uint8_t*>(address);
+  if (!data) {
+    return;
+  }
+  uint64_t nonzero = 0, sums[4] = {};
+  for (uint32_t i = 0; i < length; ++i) {
+    nonzero += data[i] != 0;
+    sums[i & 3] += data[i];
+  }
+  uint32_t pixels = std::max(length / 4, uint32_t(1));
+  REXGPU_INFO("  {} {:08X}+{:X}: {:.1f}% nonzero bytes, byte means {} {} {} {}", what, address,
+              length, 100.0 * nonzero / std::max(length, uint32_t(1)), sums[0] / pixels,
+              sums[1] / pixels, sums[2] / pixels, sums[3] / pixels);
+  if (dump) {
+    std::string path = "run/guest_" + std::to_string(frame_current_) + "_" +
+                       fmt::format("{:08X}", address) + ".bin";
+    if (FILE* file = std::fopen(path.c_str(), "wb")) {
+      std::fwrite(data, 1, length, file);
+      std::fclose(file);
+    }
+  }
+}
+
 bool VulkanCommandProcessor::IssueCopy() {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
@@ -4394,9 +4565,11 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
   if (readback_mode == ReadbackResolveMode::kDisabled) {
-    uint32_t written_address, written_length;
-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
-                                         written_address, written_length);
+    uint32_t written_address = 0, written_length = 0;
+    bool resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+                                                  written_address, written_length);
+    LogResolveForDebugging(resolved, written_address, written_length);
+    return resolved;
   }
 
   return IssueCopy_ReadbackResolvePath();
@@ -4407,9 +4580,11 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
-  uint32_t written_address, written_length;
-  if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
-                                     written_length)) {
+  uint32_t written_address = 0, written_length = 0;
+  bool resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+                                                written_address, written_length);
+  LogResolveForDebugging(resolved, written_address, written_length);
+  if (!resolved) {
     return false;
   }
 
@@ -4782,6 +4957,66 @@ bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
   return true;
 }
 
+bool VulkanCommandProcessor::EnsureGpuTimestampQueryPool() {
+  if (gpu_timestamp_query_pool_ != VK_NULL_HANDLE) {
+    return true;
+  }
+  if (gpu_timestamps_unsupported_) {
+    return false;
+  }
+  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanInstance::Functions& ifn = vulkan_device->vulkan_instance()->functions();
+  VkPhysicalDeviceProperties properties;
+  ifn.vkGetPhysicalDeviceProperties(vulkan_device->physical_device(), &properties);
+  uint32_t queue_family_count = 0;
+  ifn.vkGetPhysicalDeviceQueueFamilyProperties(vulkan_device->physical_device(),
+                                               &queue_family_count, nullptr);
+  std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+  ifn.vkGetPhysicalDeviceQueueFamilyProperties(vulkan_device->physical_device(),
+                                               &queue_family_count, queue_families.data());
+  uint32_t queue_family = vulkan_device->queue_family_graphics_compute();
+  uint32_t valid_bits =
+      queue_family < queue_family_count ? queue_families[queue_family].timestampValidBits : 0;
+  if (!valid_bits || properties.limits.timestampPeriod <= 0.0f) {
+    REXGPU_WARN("log_frame_stats: the graphics queue has no timestamps, so no GPU time");
+    gpu_timestamps_unsupported_ = true;
+    return false;
+  }
+  gpu_timestamp_period_ns_ = properties.limits.timestampPeriod;
+  gpu_timestamp_mask_ = valid_bits >= 64 ? UINT64_MAX : (uint64_t(1) << valid_bits) - 1;
+  VkQueryPoolCreateInfo pool_info = {};
+  pool_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+  pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+  pool_info.queryCount = kGpuTimestampSlots * 2;
+  if (vulkan_device->functions().vkCreateQueryPool(vulkan_device->device(), &pool_info, nullptr,
+                                                   &gpu_timestamp_query_pool_) != VK_SUCCESS) {
+    REXGPU_WARN("log_frame_stats: failed to create the GPU timestamp query pool");
+    gpu_timestamps_unsupported_ = true;
+    return false;
+  }
+  return true;
+}
+
+void VulkanCommandProcessor::ReadGpuTimestamps() {
+  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  while (!gpu_timestamps_pending_.empty() &&
+         gpu_timestamps_pending_.front().first <= submission_completed_) {
+    uint32_t slot = gpu_timestamps_pending_.front().second;
+    gpu_timestamps_pending_.pop_front();
+    uint64_t timestamps[2];
+    if (dfn.vkGetQueryPoolResults(vulkan_device->device(), gpu_timestamp_query_pool_, slot * 2, 2,
+                                  sizeof(timestamps), timestamps, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+      continue;
+    }
+    uint64_t ticks = (timestamps[1] - timestamps[0]) & gpu_timestamp_mask_;
+    rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kGpuBusyUs,
+                                uint64_t(double(ticks) * gpu_timestamp_period_ns_ / 1000.0));
+    rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kGpuSubmissions, 1);
+  }
+}
+
 void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
   DisableHostOcclusionQueries();
 
@@ -4972,9 +5207,13 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
     // defined by vkQueueSubmit additionally include in the first
     // synchronization scope all commands that occur earlier in submission
     // order."
-    VkResult wait_result =
-        dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
-                            submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    VkResult wait_result;
+    {
+      rex::perf::frame_stats::ScopedTimer wait_timer(rex::perf::frame_stats::Stat::kFenceWaitUs,
+                                                     rex::perf::frame_stats::Stat::kFenceWaits);
+      wait_result = dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
+                                        submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    }
     if (wait_result == VK_SUCCESS) {
       fences_awaited += await_submission - submission_completed_;
     } else {
@@ -5017,6 +5256,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
   submissions_in_flight_fences_.erase(submissions_in_flight_fences_.cbegin(),
                                       submissions_in_flight_fences_awaited_end);
   submission_completed_ += fences_awaited;
+  ReadGpuTimestamps();
 
   // Reclaim semaphores.
   while (!submissions_in_flight_semaphores_.empty()) {
@@ -5387,7 +5627,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       REXGPU_ERROR("Failed to begin a Vulkan command buffer");
       return false;
     }
+    // Timestamps around the submission's commands, for log_frame_stats.
+    uint32_t gpu_timestamp_slot = UINT32_MAX;
+    if (rex::perf::frame_stats::enabled() && EnsureGpuTimestampQueryPool() &&
+        gpu_timestamps_pending_.size() < kGpuTimestampSlots) {
+      gpu_timestamp_slot = gpu_timestamp_next_slot_;
+      gpu_timestamp_next_slot_ = (gpu_timestamp_next_slot_ + 1) % kGpuTimestampSlots;
+      dfn.vkCmdResetQueryPool(command_buffer.buffer, gpu_timestamp_query_pool_,
+                              gpu_timestamp_slot * 2, 2);
+      dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              gpu_timestamp_query_pool_, gpu_timestamp_slot * 2);
+    }
+    rex::perf::frame_stats::LapTimer submit_laps;
     deferred_command_buffer_.Execute(command_buffer.buffer);
+    submit_laps.Lap(rex::perf::frame_stats::Stat::kCpReplayUs);
+    if (gpu_timestamp_slot != UINT32_MAX) {
+      dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                              gpu_timestamp_query_pool_, gpu_timestamp_slot * 2 + 1);
+      gpu_timestamps_pending_.emplace_back(GetCurrentSubmission(), gpu_timestamp_slot);
+    }
     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
       REXGPU_ERROR("Failed to end a Vulkan command buffer");
       return false;
@@ -5421,6 +5679,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
     }
+    submit_laps.Lap(rex::perf::frame_stats::Stat::kCpQueueSubmitUs);
     if (submit_result != VK_SUCCESS) {
       REXGPU_ERROR("Failed to submit a Vulkan command buffer");
       if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
@@ -5449,6 +5708,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   if (is_closing_frame) {
     if (REXCVAR_GET(clear_memory_page_state) && shared_memory_) {
       shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
+    }
+    if (REXCVAR_GET(vulkan_invalidate_textures_every_frame) && shared_memory_) {
+      shared_memory_->FireAllWatchesForDebugging();
     }
     frame_open_ = false;
     // Submission already closed now, so minus 1.

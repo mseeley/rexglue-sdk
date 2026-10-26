@@ -24,6 +24,7 @@
 #include <fmt/format.h>
 
 #include <rex/assert.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/filesystem.h>
@@ -1017,6 +1018,8 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
 
 bool VulkanPipelineCache::EnsureShadersTranslated(VulkanShader::VulkanTranslation* vertex_shader,
                                                   VulkanShader::VulkanTranslation* pixel_shader) {
+  rex::perf::frame_stats::ScopedTimer cp_translate_timer(
+      rex::perf::frame_stats::Stat::kCpTranslateUs);
   // Edge flags are not supported yet (because polygon primitives are not).
   assert_true(register_file_.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode !=
                   xenos::VertexShaderExportMode::kPosition2VectorsEdge &&
@@ -1134,6 +1137,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
   if (it != pipelines_.end()) {
     VkPipeline found_pipeline = it->second.pipeline.load(std::memory_order_acquire);
     if (found_pipeline == VK_NULL_HANDLE) {
+      rex::perf::frame_stats::ScopedTimer block_timer(
+          rex::perf::frame_stats::Stat::kPipelineBlockUs);
       PipelineCreationArguments creation_arguments;
       if (!TryGetPipelineCreationArgumentsForDescription(description, &*it, creation_arguments) ||
           !EnsurePipelineCreated(creation_arguments)) {
@@ -1153,6 +1158,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
   }
 
   // Create the pipeline if not already existing.
+  rex::perf::frame_stats::ScopedTimer block_timer(rex::perf::frame_stats::Stat::kPipelineBlockUs);
   auto& pipeline = *pipelines_.emplace(description, Pipeline()).first;
   PipelineCreationArguments creation_arguments_real;
   if (!TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
@@ -1243,11 +1249,91 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
 
   // Perform translation.
   // If this fails the shader will be marked as invalid and ignored later.
+  rex::perf::frame_stats::ScopedTimer translate_timer(
+      rex::perf::frame_stats::Stat::kShaderTranslateUs,
+      rex::perf::frame_stats::Stat::kShadersTranslated,
+      rex::perf::frame_stats::Stat::kShaderTranslateCpuUs);
+  rex::perf::frame_stats::ThreadUsage usage_before;
+  if (rex::perf::frame_stats::enabled()) {
+    usage_before = rex::perf::frame_stats::GetThreadUsage();
+    // Where each translating thread may run, once per thread.
+    thread_local bool thread_logged = false;
+    if (!thread_logged) {
+      thread_logged = true;
+      rex::thread::Thread* thread = rex::thread::Thread::GetCurrentThread();
+      if (thread) {
+        REXGPU_INFO("frame_stats: translating shaders on thread \"{}\", affinity mask {:X}",
+                    thread->name(), thread->affinity_mask());
+      }
+    }
+  }
+  struct UsageAdder {
+    const rex::perf::frame_stats::ThreadUsage& before;
+    ~UsageAdder() {
+      if (!rex::perf::frame_stats::enabled()) {
+        return;
+      }
+      rex::perf::frame_stats::ThreadUsage after = rex::perf::frame_stats::GetThreadUsage();
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslateSysUs,
+                                  after.sys_us - before.sys_us);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslateFaults,
+                                  after.faults - before.faults);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslatePreempts,
+                                  after.preempts - before.preempts);
+      rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kShaderTranslateBlocks,
+                                  after.blocks - before.blocks);
+    }
+  } usage_adder{usage_before};
+  // The pixel shader share of the above, and with log_shader_origins one line
+  // per shader, to compare the cost of each shader type and size.
+  struct TypeAdder {
+    const VulkanShader& shader;
+    uint64_t modification;
+    uint64_t start = rex::perf::frame_stats::enabled() ? rex::perf::frame_stats::NowUs() : 0;
+    uint64_t cpu_start = start ? rex::perf::frame_stats::ThreadCpuUs() : 0;
+    ~TypeAdder() {
+      if (!start) {
+        return;
+      }
+      uint64_t us = rex::perf::frame_stats::NowUs() - start;
+      uint64_t cpu_us = rex::perf::frame_stats::ThreadCpuUs() - cpu_start;
+      bool is_pixel = shader.type() == xenos::ShaderType::kPixel;
+      if (is_pixel) {
+        rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kPixelShadersTranslated, 1);
+        rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kPixelShaderTranslateUs, us);
+        rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kPixelShaderTranslateCpuUs,
+                                    cpu_us);
+      }
+      if (rex::perf::frame_stats::log_shader_origins()) {
+        REXGPU_INFO("shader_origins: translated {:016X} {} {} dwords modification {:016X} {} us "
+                    "cpu {} us",
+                    shader.ucode_data_hash(), is_pixel ? "pixel" : "vertex",
+                    shader.ucode_dword_count(), modification, us, cpu_us);
+      }
+    }
+  } type_adder{shader, translation.modification()};
   if (!translator.TranslateAnalyzedShader(translation)) {
     REXGPU_ERROR("Shader {:016X} translation failed; marking as ignored", shader.ucode_data_hash());
     return false;
   }
-  if (translation.GetOrCreateShaderModule() == VK_NULL_HANDLE) {
+
+  // Dump shader files if desired.
+  if (!REXCVAR_GET(dump_shaders).empty()) {
+    bool edram_fsi_used =
+        render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
+    translation.Dump(REXCVAR_GET(dump_shaders), (shader.type() == xenos::ShaderType::kPixel)
+                                                    ? (edram_fsi_used ? "vulkan_fsi" : "vulkan_rt")
+                                                    : "vulkan");
+  }
+
+  VkShaderModule shader_module;
+  {
+    rex::perf::frame_stats::ScopedTimer module_timer(
+        rex::perf::frame_stats::Stat::kShaderModuleUs, rex::perf::frame_stats::Stat::kCount,
+        rex::perf::frame_stats::Stat::kShaderModuleCpuUs);
+    shader_module = translation.GetOrCreateShaderModule();
+  }
+  if (shader_module == VK_NULL_HANDLE) {
     return false;
   }
 
@@ -3485,8 +3571,15 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  VkResult create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
-                                                         &pipeline_create_info, nullptr, &pipeline);
+  VkResult create_result;
+  {
+    rex::perf::frame_stats::ScopedTimer create_timer(
+        rex::perf::frame_stats::Stat::kPipelineCreateUs,
+        rex::perf::frame_stats::Stat::kPipelinesCreated,
+        rex::perf::frame_stats::Stat::kPipelineCreateCpuUs);
+    create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info,
+                                                  nullptr, &pipeline);
+  }
   if (create_result != VK_SUCCESS) {
     uint64_t ps_hash = creation_arguments.pixel_shader
                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()

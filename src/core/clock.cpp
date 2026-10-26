@@ -14,6 +14,7 @@
 #include <mutex>
 
 #include <rex/chrono/clock.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/cvar.h>
 #include <rex/math.h>
 
@@ -112,6 +113,7 @@ uint64_t Clock::QueryHostTickFrequency() {
   return host_tick_frequency_platform();
 }
 uint64_t Clock::QueryHostTickCount() {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kHostTickReads, 1);
 #if REX_CLOCK_RAW_AVAILABLE
   if (REXCVAR_GET(clock_source_raw)) {
     return host_tick_count_raw();
@@ -156,6 +158,7 @@ void Clock::set_guest_system_time_base(uint64_t time_base) {
 }
 
 uint64_t Clock::QueryGuestTickCount() {
+  rex::perf::frame_stats::Add(rex::perf::frame_stats::Stat::kGuestTickReads, 1);
   auto guest_tick_count = UpdateGuestClock();
   return guest_tick_count;
 }

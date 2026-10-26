@@ -23,6 +23,7 @@
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/logging.h>
+#include <rex/perf/frame_stats.h>
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/system/kernel_state.h>
@@ -374,6 +375,7 @@ u32 KeQueryPerformanceFrequency_entry() {
 }
 
 u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 interval_ptr) {
+  rex::perf::frame_stats::SwapThreadWait swap_thread_wait(true);
   XThread* thread = XThread::GetCurrentThread();
 
   if (alertable) {
@@ -390,6 +392,7 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
 }
 
 u32 NtYieldExecution_entry() {
+  rex::perf::frame_stats::SwapThreadWait swap_thread_wait(true);
   rex::thread::MaybeYield();
   return X_STATUS_SUCCESS;
 }
@@ -817,6 +820,53 @@ u32 NtCancelTimer_entry(u32 timer_handle, mapped_u32 current_state_ptr) {
   return result;
 }
 
+namespace {
+
+const char* ObjectTypeName(XObject::Type type) {
+  switch (type) {
+    case XObject::Type::Event:
+      return "event";
+    case XObject::Type::Mutant:
+      return "mutant";
+    case XObject::Type::Semaphore:
+      return "semaphore";
+    case XObject::Type::Thread:
+      return "thread";
+    case XObject::Type::Timer:
+      return "timer";
+    default:
+      return "object";
+  }
+}
+
+// log_frame_stats_swap_waits: what a wait on the swap thread is on, and the
+// guest code that waits (the return address, and the one above it through
+// the back chain).
+void SetWaitTarget(rex::perf::frame_stats::SwapThreadWait& wait, XObject* object, uint32_t count) {
+  if (!object || !rex::perf::frame_stats::WantWaitTarget()) {
+    return;
+  }
+  rex::perf::frame_stats::WaitTarget target;
+  PPCContext* ctx = rex::runtime::current_ppc_context();
+  target.caller = uint32_t(ctx->lr);
+  uint32_t frame = ctx->r1.u32;
+  auto* memory = REX_KERNEL_MEMORY();
+  if (frame) {
+    uint32_t back = memory::load_and_swap<uint32_t>(memory->TranslateVirtual(frame));
+    if (back > frame && back - frame < (1u << 20)) {
+      target.caller2 = memory::load_and_swap<uint32_t>(memory->TranslateVirtual(back - 8));
+    }
+  }
+  target.object = object;
+  target.guest_object = object->guest_object();
+  target.handle = object->handle();
+  target.type = ObjectTypeName(object->type());
+  target.count = count;
+  wait.set_target(target);
+}
+
+}  // namespace
+
 uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason, uint32_t processor_mode,
                                  uint32_t alertable, uint64_t* timeout_ptr) {
   auto object = XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(), object_ptr);
@@ -838,6 +888,11 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason, uint32_
 
 u32 KeWaitForSingleObject_entry(mapped_void object_ptr, u32 wait_reason, u32 processor_mode,
                                 u32 alertable, mapped_u64 timeout_ptr) {
+  rex::perf::frame_stats::SwapThreadWait swap_thread_wait(false);
+  if (rex::perf::frame_stats::WantWaitTarget()) {
+    SetWaitTarget(swap_thread_wait,
+                  XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(), object_ptr).get(), 1);
+  }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   // REXKRNL_IMPORT_TRACE("KeWaitForSingleObject", "obj={:#x} reason={} mode={} alertable={}
   // timeout={}",
@@ -852,10 +907,12 @@ u32 KeWaitForSingleObject_entry(mapped_void object_ptr, u32 wait_reason, u32 pro
 
 u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertable,
                                   mapped_u64 timeout_ptr) {
+  rex::perf::frame_stats::SwapThreadWait swap_thread_wait(false);
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
   if (object) {
+    SetWaitTarget(swap_thread_wait, object.get(), 1);
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
     result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
     if (alertable && result == X_STATUS_USER_APC) {
@@ -871,6 +928,7 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
 u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_type,
                                    u32 wait_reason, u32 processor_mode, u32 alertable,
                                    mapped_u64 timeout_ptr, mapped_void wait_block_array_ptr) {
+  rex::perf::frame_stats::SwapThreadWait swap_thread_wait(false);
   assert_true(wait_type <= 1);
 
   std::vector<object_ref<XObject>> objects;
@@ -882,6 +940,9 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
     }
 
     objects.push_back(std::move(object_ref));
+  }
+  if (!objects.empty()) {
+    SetWaitTarget(swap_thread_wait, objects[0].get(), count);
   }
 
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
@@ -919,6 +980,11 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
 
 u32 NtWaitForMultipleObjectsEx_entry(u32 count, mapped_u32 handles, u32 wait_type, u32 wait_mode,
                                      u32 alertable, mapped_u64 timeout_ptr) {
+  rex::perf::frame_stats::SwapThreadWait swap_thread_wait(false);
+  if (count && rex::perf::frame_stats::WantWaitTarget()) {
+    SetWaitTarget(swap_thread_wait,
+                  REX_KERNEL_OBJECTS()->LookupObject<XObject>(uint32_t(handles[0])).get(), count);
+  }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   return xeNtWaitForMultipleObjectsEx(count, handles, wait_type, wait_mode, alertable,
                                       timeout_ptr ? &timeout : nullptr);
@@ -926,11 +992,13 @@ u32 NtWaitForMultipleObjectsEx_entry(u32 count, mapped_u32 handles, u32 wait_typ
 
 u32 NtSignalAndWaitForSingleObjectEx_entry(u32 signal_handle, u32 wait_handle, u32 alertable,
                                            u32 r6, mapped_u64 timeout_ptr) {
+  rex::perf::frame_stats::SwapThreadWait swap_thread_wait(false);
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto signal_object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(signal_handle);
   auto wait_object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(wait_handle);
   if (signal_object && wait_object) {
+    SetWaitTarget(swap_thread_wait, wait_object.get(), 1);
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
     result = XObject::SignalAndWait(signal_object.get(), wait_object.get(), 3, 1, alertable,
                                     timeout_ptr ? &timeout : nullptr);

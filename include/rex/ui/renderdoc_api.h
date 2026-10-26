@@ -14,9 +14,12 @@
 
 #include <rex/platform/dynlib.h>
 
+// The vendored RenderDoc app API header only knows Windows and Linux.
 #if REX_PLATFORM_MAC
+#define REX_HAS_RENDERDOC 0
 struct RENDERDOC_API_1_0_0;
 #else
+#define REX_HAS_RENDERDOC 1
 #include <renderdoc_app.h>
 #endif
 
