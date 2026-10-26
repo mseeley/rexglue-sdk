@@ -67,6 +67,7 @@ Result<CodegenContext> CodegenContext::Create(const std::filesystem::path& confi
   }
 
   ctx.binary_ = BinaryView::fromModule(*module);
+  ctx.binary_.markSectionsAsData(ctx.config_.dataSections);
   ctx.resolver_ = runtime.export_resolver();
 
   REXCODEGEN_TRACE("Loaded XEX: base=0x{:08X}, size=0x{:X}, entry=0x{:08X}",
@@ -85,6 +86,7 @@ CodegenContext CodegenContext::Create(BinaryView binary, RecompilerConfig config
   CodegenContext ctx;
   ctx.binary_ = std::move(binary);
   ctx.config_ = std::move(config);
+  ctx.binary_.markSectionsAsData(ctx.config_.dataSections);
   return ctx;
 }
 

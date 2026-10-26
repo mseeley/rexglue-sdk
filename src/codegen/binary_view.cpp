@@ -104,6 +104,29 @@ BinaryView BinaryView::fromModule(const runtime::Module& module) {
   return view;
 }
 
+size_t BinaryView::markSectionsAsData(std::span<const std::string> names) {
+  size_t changed = 0;
+  for (const auto& name : names) {
+    bool found = false;
+    for (auto& section : sections_) {
+      if (section.name != name)
+        continue;
+      found = true;
+      if (section.executable) {
+        section.executable = false;
+        ++changed;
+        REXCODEGEN_INFO("BinaryView: treating section '{}' (0x{:08X}, 0x{:X} bytes) as data",
+                        section.name, section.baseAddress, section.size);
+      }
+    }
+    if (!found) {
+      REXCODEGEN_WARN("BinaryView: data_sections names '{}', but the image has no such section",
+                      name);
+    }
+  }
+  return changed;
+}
+
 const uint8_t* BinaryView::translate(uint32_t addr) const {
   for (const auto& section : sections_) {
     if (auto* ptr = section.translate(addr)) {

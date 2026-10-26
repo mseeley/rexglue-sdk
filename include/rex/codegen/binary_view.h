@@ -67,6 +67,11 @@ class BinaryView {
   const SectionView* findSectionByName(std::string_view name) const;
   std::span<const SectionView> sections() const { return sections_; }
 
+  /// Treat the named sections as data even if the image flags them executable
+  /// (e.g. shader blobs linked into an executable section). Returns how many
+  /// sections were changed.
+  size_t markSectionsAsData(std::span<const std::string> names);
+
   // Metadata access
   uint32_t baseAddress() const { return baseAddress_; }
   uint32_t imageSize() const { return imageSize_; }
