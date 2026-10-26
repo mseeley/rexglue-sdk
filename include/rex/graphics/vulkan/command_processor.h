@@ -15,6 +15,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -592,6 +593,15 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Temporary storage with reusable memory for writing image and sampler
   // descriptors.
   std::vector<VkDescriptorImageInfo> descriptor_write_image_info_;
+  // The texture and sampler bindings last written to the vertex [0] and pixel
+  // [1] shader descriptor sets, valid while the set's bit in
+  // current_graphics_descriptor_set_values_up_to_date_ is.
+  struct WrittenTextureBindings {
+    uint32_t texture_count = 0;
+    uint32_t sampler_count = 0;
+    std::vector<VkDescriptorImageInfo> image_infos;
+  };
+  WrittenTextureBindings texture_bindings_written_[2];
 
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
 
@@ -614,6 +624,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Direct3D 12 PIX warnings.
   static constexpr uint32_t kLinkedTypeDescriptorPoolSetCount = 32768;
   static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBufferDynamic;
   static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
   static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_uniform_buffer_;
@@ -621,9 +632,26 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::deque<UsedSingleTransientDescriptor> single_transient_descriptors_used_;
   std::array<std::vector<VkDescriptorSet>, size_t(SingleTransientDescriptorLayout::kCount)>
       single_transient_descriptors_free_;
-  // <Usage frame, set>.
-  std::deque<std::pair<uint64_t, VkDescriptorSet>> constants_transient_descriptors_used_;
-  std::vector<VkDescriptorSet> constants_transient_descriptors_free_;
+
+  // Guest draw constants. Their descriptor set layout has dynamic uniform
+  // buffer bindings with fixed ranges (ConstantBufferRange), so one descriptor
+  // set serves every draw whose constant buffers are in the same uniform
+  // buffer pool pages, with the offsets given when binding. The sets are kept
+  // for as long as the pool's pages (until ClearTransientDescriptorPools).
+  struct ConstantsDescriptorSetKey {
+    VkBuffer buffers[SpirvShaderTranslator::kConstantBufferCount];
+    struct Hasher {
+      size_t operator()(const ConstantsDescriptorSetKey& key) const {
+        return size_t(XXH3_64bits(key.buffers, sizeof(key.buffers)));
+      }
+    };
+    bool operator==(const ConstantsDescriptorSetKey& other_key) const {
+      return std::memcmp(buffers, other_key.buffers, sizeof(buffers)) == 0;
+    }
+  };
+  ui::vulkan::LinkedTypeDescriptorSetAllocator constants_descriptor_allocator_;
+  std::unordered_map<ConstantsDescriptorSetKey, VkDescriptorSet, ConstantsDescriptorSetKey::Hasher>
+      constants_descriptor_sets_;
 
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_textures_;
   std::deque<UsedTextureTransientDescriptorSet> texture_transient_descriptor_sets_used_;
@@ -851,6 +879,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Whether up-to-date data has been written to constant (uniform) buffers, and
   // the buffer infos in current_constant_buffer_infos_ point to them.
   uint32_t current_constant_buffers_up_to_date_;
+  // The offsets in current_constant_buffer_infos_, bound as the dynamic
+  // offsets of the constants descriptor set.
+  uint32_t current_constant_buffer_dynamic_offsets_[SpirvShaderTranslator::kConstantBufferCount];
   VkDescriptorSet current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetCount];
   // Whether descriptor sets in current_graphics_descriptor_sets_ point to
   // up-to-date data.
