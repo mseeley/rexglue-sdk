@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -707,6 +708,14 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     fwrite(&pipeline_storage_file_header, sizeof(pipeline_storage_file_header), 1,
            pipeline_storage_file_);
   }
+
+  // Both files were read before being written, and C requires a positioning
+  // call between input and output on an update stream. glibc tolerates its
+  // absence; the PS5's libc fails every later fwrite.
+  clearerr(pipeline_storage_file_);
+  rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_END);
+  clearerr(shader_storage_file_);
+  rex::filesystem::Seek(shader_storage_file_, 0, SEEK_END);
 
   shader_storage_cache_root_ = cache_root;
   shader_storage_title_id_ = title_id;
@@ -3740,7 +3749,9 @@ void VulkanPipelineCache::StorageWriteThread() {
     if (flush_pipelines) {
       flush_pipelines = false;
       assert_not_null(pipeline_storage_file_);
-      fflush(pipeline_storage_file_);
+      if (fflush(pipeline_storage_file_)) {
+        REXGPU_ERROR("VulkanPipelineCache: Failed to flush the pipeline storage: errno {}", errno);
+      }
     }
 
     const Shader* shader = nullptr;
@@ -3768,7 +3779,12 @@ void VulkanPipelineCache::StorageWriteThread() {
         flush_pipelines = true;
       }
       if (!shader && !write_pipeline) {
-        storage_write_request_cond_.wait(lock);
+        // Flush at the top of the loop first. Waiting here would hold the
+        // last written shaders and pipelines in the stdio buffer until the
+        // next request, which never comes if the process is killed.
+        if (!flush_shaders && !flush_pipelines) {
+          storage_write_request_cond_.wait(lock);
+        }
         continue;
       }
     }
@@ -3792,7 +3808,11 @@ void VulkanPipelineCache::StorageWriteThread() {
 
     if (write_pipeline) {
       assert_not_null(pipeline_storage_file_);
-      fwrite(&pipeline_description, sizeof(pipeline_description), 1, pipeline_storage_file_);
+      if (!fwrite(&pipeline_description, sizeof(pipeline_description), 1,
+                  pipeline_storage_file_)) {
+        REXGPU_ERROR("VulkanPipelineCache: Failed to write to the pipeline storage: errno {}",
+                     errno);
+      }
     }
   }
 }
