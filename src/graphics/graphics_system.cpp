@@ -166,7 +166,14 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             MarkVblank();
             last_frame_time += interval_ticks;
           }
-          rex::thread::Sleep(std::chrono::milliseconds(1));
+          // Sleep until the next vblank is due rather than in 1 ms steps, so
+          // each one fires within the system's wake-up latency of its time
+          // instead of up to a millisecond or more late.
+          uint64_t now_time = chrono::Clock::QueryGuestTickCount();
+          uint64_t next_frame_time = last_frame_time + interval_ticks;
+          uint64_t remaining_ticks = next_frame_time > now_time ? next_frame_time - now_time : 0;
+          rex::thread::Sleep(std::chrono::microseconds(remaining_ticks * 1000000 /
+                                                       guest_tick_frequency));
         }
         return 0;
       }));
