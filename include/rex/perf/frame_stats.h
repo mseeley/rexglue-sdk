@@ -170,15 +170,43 @@ struct CpWait {
 void NoteCpWait(const CpWait& wait, uint64_t us, uint32_t polls, uint32_t sleeps,
                 uint32_t last_value);
 
+// log_frame_stats_timeline_ms: what happened when in each slow frame. The
+// vsync thread, the command processor and the swap thread note events; the
+// swap thread logs those of a frame at least that long at its swap.
+enum class TimelineEvent : uint8_t {
+  kVblank,          // the guest vblank (GraphicsSystem::MarkVblank)
+  kCpInterrupt,     // the command processor dispatching a guest interrupt
+  kCpWaitStart,     // a WAIT_REG_MEM that has to sleep, at its first sleep
+  kCpWaitEnd,       // ... and when it is satisfied
+  kCpSwap,          // the command processor executing the swap packet
+  kGameWaitStart,   // a guest kernel wait on the swap thread
+  kGameWaitEnd,
+  kCount
+};
+bool timeline();
+void NoteTimelineSlow(TimelineEvent event);
+inline void NoteTimeline(TimelineEvent event) {
+  if (timeline()) {
+    NoteTimelineSlow(event);
+  }
+}
+
 // Adds the time of a guest kernel wait or delay to the swap thread's stats,
 // when on that thread; with a WaitTarget, to its per-target tally as well.
 class SwapThreadWait {
  public:
   explicit SwapThreadWait(bool delay)
-      : delay_(delay), start_(enabled() && IsGuestSwapThread() ? NowUs() : 0) {}
+      : delay_(delay), start_(enabled() && IsGuestSwapThread() ? NowUs() : 0) {
+    if (start_ && !delay_) {
+      NoteTimeline(TimelineEvent::kGameWaitStart);
+    }
+  }
   ~SwapThreadWait() {
     if (!start_) {
       return;
+    }
+    if (!delay_) {
+      NoteTimeline(TimelineEvent::kGameWaitEnd);
     }
     uint64_t us = NowUs() - start_;
     if (delay_) {

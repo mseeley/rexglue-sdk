@@ -933,6 +933,8 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, 
   for (int n = 0; n < 6; n++) {
     if (cpu_mask & (1 << n)) {
       if (graphics_system_) {
+        rex::perf::frame_stats::NoteTimeline(
+            rex::perf::frame_stats::TimelineEvent::kCpInterrupt);
         graphics_system_->DispatchInterruptCallback(1, n);
       }
     }
@@ -943,6 +945,7 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, 
 bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
+  rex::perf::frame_stats::NoteTimeline(rex::perf::frame_stats::TimelineEvent::kCpSwap);
 
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
   {
@@ -1073,6 +1076,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
     if (!matched) {
       // Wait.
       if (wait >= 0x100) {
+        if (!sleeps) {
+          rex::perf::frame_stats::NoteTimeline(
+              rex::perf::frame_stats::TimelineEvent::kCpWaitStart);
+        }
         ++sleeps;
         PrepareForWait();
         if (!REXCVAR_GET(vsync)) {
@@ -1093,6 +1100,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       }
     }
   } while (!matched);
+  if (sleeps) {
+    rex::perf::frame_stats::NoteTimeline(rex::perf::frame_stats::TimelineEvent::kCpWaitEnd);
+  }
   if (note_wait) {
     rex::perf::frame_stats::NoteCpWait({is_memory, poll_reg_addr, wait_info & 0x7, ref, mask, wait},
                                        rex::perf::frame_stats::NowUs() - note_start_us, polls,

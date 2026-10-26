@@ -88,6 +88,11 @@ REXCVAR_DEFINE_INT32(log_frame_stats_swap_samples_ms, 0, "Perf",
                      "about once a millisecond, and log the samples of every frame at least this "
                      "long (0: off; FreeBSD and Linux on x86-64)");
 
+REXCVAR_DEFINE_INT32(log_frame_stats_timeline_ms, 0, "Perf",
+                     "With log_frame_stats, log the vblanks, command processor waits, swaps and "
+                     "interrupts and the swap thread's waits of every frame at least this long, "
+                     "and of the frame before it (0: off)");
+
 REXCVAR_DEFINE_BOOL(log_shader_origins, false, "Perf",
                     "Log physical allocations with their guest callers, file reads into guest "
                     "memory, and each shader's first IM_LOAD");
@@ -539,6 +544,49 @@ void NoteCpWait(const CpWait& wait, uint64_t us, uint32_t polls, uint32_t sleeps
   tally.last_value = last_value;
 }
 
+bool timeline() {
+  return REXCVAR_GET(log_frame_stats_timeline_ms) > 0 && REXCVAR_GET(log_frame_stats);
+}
+
+namespace {
+
+// Events as (time in µs << 4) | type, from any thread.
+constexpr size_t kTimelineCount = 1024;
+std::array<std::atomic<uint64_t>, kTimelineCount> g_timeline;
+std::atomic<uint64_t> g_timeline_next{0};
+
+// The events after `from_us` up to `to_us`, oldest first, as letters with ms
+// from `from_us`: V vblank, I interrupt, W..w command processor wait, X swap
+// packet, G..g swap thread wait.
+std::string FormatTimeline(uint64_t from_us, uint64_t to_us) {
+  static const char kLetters[] = "VIWwXGg";
+  std::vector<uint64_t> events;
+  uint64_t next = g_timeline_next.load(std::memory_order_acquire);
+  for (uint64_t i = next > kTimelineCount ? next - kTimelineCount : 0; i < next; ++i) {
+    uint64_t event = g_timeline[i % kTimelineCount].load(std::memory_order_relaxed);
+    uint64_t us = event >> 4;
+    if (us > from_us && us <= to_us) {
+      events.push_back(event);
+    }
+  }
+  std::sort(events.begin(), events.end());
+  std::string line;
+  for (uint64_t event : events) {
+    uint32_t type = uint32_t(event & 15);
+    line += fmt::format(" {}{:.1f}", type < sizeof(kLetters) - 1 ? kLetters[type] : '?',
+                        double((event >> 4) - from_us) / 1000.0);
+  }
+  return line;
+}
+
+}  // namespace
+
+void NoteTimelineSlow(TimelineEvent event) {
+  uint64_t index = g_timeline_next.fetch_add(1, std::memory_order_relaxed);
+  g_timeline[index % kTimelineCount].store((NowUs() << 4) | uint64_t(event),
+                                           std::memory_order_relaxed);
+}
+
 void SwapThreadWait::NoteSwapThreadWait(const WaitTarget& target, uint64_t us) {
   WaitTally& tally = g_wait_tallies[{target.caller, target.object}];
   tally.target = target;
@@ -823,6 +871,17 @@ void OnGuestSwap() {
   }
   frame_first_sample = frame_last_sample;
 #endif
+  int32_t timeline_ms = REXCVAR_GET(log_frame_stats_timeline_ms);
+  static uint64_t previous_swap_us = 0;
+  if (timeline_ms > 0 && frame_us >= uint64_t(timeline_ms) * 1000) {
+    // The frame before too: what was already late when this one began.
+    REXLOG_INFO("frame_stats: timeline {:.1f} ms:{} | before, {:.1f} ms:{}",
+                double(frame_us) / 1000.0, FormatTimeline(last_swap_us, now_us),
+                double(last_swap_us - previous_swap_us) / 1000.0,
+                previous_swap_us ? FormatTimeline(previous_swap_us, last_swap_us)
+                                 : std::string());
+  }
+  previous_swap_us = last_swap_us;
   last_swap_us = now_us;
   last_swap_totals = totals;
 
