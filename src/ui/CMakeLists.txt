@@ -138,6 +138,9 @@ if(REXUI_HAS_FIDELITYFX_RUNTIME)
 endif()
 
 if(REXGLUE_USE_VULKAN)
+    if(REXGLUE_VULKAN_LINKED_LOADER)
+        target_compile_definitions(rexui PRIVATE REX_VULKAN_LINKED_LOADER=1)
+    endif()
     target_link_libraries(rexui PUBLIC
         Vulkan::Headers
         GPUOpen::VulkanMemoryAllocator

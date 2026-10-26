@@ -2,7 +2,8 @@
 # Namespace: rex::graphics
 #
 # Runtime-loaded via rex::system::LoadGpuPlugin; consumers never link this
-# target. The Xenos format layer is compiled into rexcore.
+# target, except that REXGLUE_STATIC_RUNTIME links it into the executable. The
+# Xenos format layer is compiled into rexcore.
 
 set(REXGPU_XENOS_SOURCES
     plugin_main.cpp
@@ -96,7 +97,14 @@ if(REXGLUE_USE_D3D12)
         ${REXGPU_XENOS_D3D12_SOURCES})
 endif()
 
-add_library(rexgpu-xenos SHARED ${REXGPU_XENOS_SOURCES})
+if(REXGLUE_STATIC_RUNTIME)
+    # Linked whole into the executable by rexglue_configure_target; it
+    # registers itself with LoadGpuPlugin from a static initializer.
+    add_library(rexgpu-xenos STATIC ${REXGPU_XENOS_SOURCES})
+else()
+    add_library(rexgpu-xenos SHARED ${REXGPU_XENOS_SOURCES})
+endif()
+target_compile_definitions(rexgpu-xenos PRIVATE REX_GPU_PLUGIN_NAME="xenos")
 add_library(rex::gpu-xenos ALIAS rexgpu-xenos)
 
 set_target_properties(rexgpu-xenos PROPERTIES

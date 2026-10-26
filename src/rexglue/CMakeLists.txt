@@ -23,6 +23,7 @@ target_link_libraries(rexglue
     PRIVATE
         rexcodegen
 )
+rexglue_link_runtime_whole_archive(rexglue)
 
 rex_target_pch(rexglue <CLI/CLI.hpp>)
 
