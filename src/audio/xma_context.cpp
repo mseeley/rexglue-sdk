@@ -112,7 +112,7 @@ bool XmaContext::Work() {
 
   // Consume-only context: no input, just drain remaining subframes.
   if (data.IsConsumeOnlyContext()) {
-    if (current_frame_remaining_subframes_ == 0) {
+    if (current_frame_remaining_subframes_ == 0 && !FlushCarry(&data)) {
       return true;
     }
     Consume(&output_rb, &data);
@@ -136,7 +136,9 @@ bool XmaContext::Work() {
     Decode(&data);
     Consume(&output_rb, &data);
 
-    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
+    // Keep going while a flushed final frame is still being written.
+    if ((!data.IsAnyInputBufferValid() && current_frame_remaining_subframes_ == 0) ||
+        data.error_status == 4) {
       break;
     }
   }
@@ -525,14 +527,39 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
   return true;
 }
 
+bool XmaContext::FlushCarry(const XMA_CONTEXT_DATA* data) {
+  // Each frame is emitted when the next one decodes (see Decode), so the last
+  // frame of a stream would stay in the carry forever. Hardware outputs every
+  // frame in full, and games count those samples: Lara Croft and the Guardian
+  // of Light waits for a voice line's played samples to reach its length before
+  // ending a level. Emit the carry, with silence where the next frame's head
+  // would go.
+  if (!carry_valid_ || current_frame_remaining_subframes_ > 0) {
+    return false;
+  }
+  const size_t pad_bytes = kDecoderStartPadding * kBytesPerSample << data->is_stereo;
+  const size_t carry_bytes = (kBytesPerFrameChannel << data->is_stereo) - pad_bytes;
+  std::memcpy(raw_frame_.data(), carry_frame_.data(), carry_bytes);
+  std::memset(raw_frame_.data() + carry_bytes, 0, pad_bytes);
+  current_frame_remaining_subframes_ = 4 << data->is_stereo;
+  loop_frame_output_limit_ = pending_output_limit_;
+  current_frame_remaining_subframes_ -=
+      std::min(pending_start_skip_, current_frame_remaining_subframes_);
+  carry_valid_ = false;
+  pending_output_limit_ = 0;
+  pending_start_skip_ = 0;
+  return current_frame_remaining_subframes_ > 0;
+}
+
 void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   SCOPE_profile_cpu_f("apu");
 
-  if (!data->IsAnyInputBufferValid()) {
+  if (current_frame_remaining_subframes_ > 0) {
     return;
   }
 
-  if (current_frame_remaining_subframes_ > 0) {
+  if (!data->IsAnyInputBufferValid()) {
+    FlushCarry(data);
     return;
   }
 
