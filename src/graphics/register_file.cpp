@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <bitset>
 #include <cstring>
 
 #include <rex/graphics/register_file.h>
@@ -35,6 +36,20 @@ const RegisterInfo* RegisterFile::GetRegisterInfo(uint32_t index) {
     default:
       return nullptr;
   }
+}
+
+bool RegisterFile::IsKnownRegister(uint32_t index) {
+  static const std::bitset<kRegisterCount> known_registers = [] {
+    std::bitset<kRegisterCount> registers;
+#define XE_GPU_REGISTER(index, type, name) \
+  if ((index) < kRegisterCount) {          \
+    registers.set(index);                  \
+  }
+#include <rex/graphics/register_table.inc>
+#undef XE_GPU_REGISTER
+    return registers;
+  }();
+  return index < kRegisterCount && known_registers[index];
 }
 
 }  // namespace rex::graphics
