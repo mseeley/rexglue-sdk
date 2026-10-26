@@ -10,6 +10,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -306,12 +307,19 @@ class RenderTargetCache {
     uint32_t end_tiles;
     RenderTarget* source;
     RenderTarget* host_depth_source;
+    // The host depth source holds data that the guest copied to this location
+    // from elsewhere (see IsHostDepthRelocationSupported), so it's read at the
+    // same position relative to its own base rather than at the same EDRAM
+    // address, and only where it matches the guest value - performed after the
+    // regular transfer of the same range, which provides the fallback.
+    bool host_depth_relocated;
     Transfer(uint32_t start_tiles, uint32_t end_tiles, RenderTarget* source,
-             RenderTarget* host_depth_source)
+             RenderTarget* host_depth_source, bool host_depth_relocated = false)
         : start_tiles(start_tiles),
           end_tiles(end_tiles),
           source(source),
-          host_depth_source(host_depth_source) {
+          host_depth_source(host_depth_source),
+          host_depth_relocated(host_depth_relocated) {
       assert_true(start_tiles < end_tiles);
     }
     struct Rectangle {
@@ -339,7 +347,8 @@ class RenderTargetCache {
     }
     bool AreSourcesSame(const Transfer& other_transfer) const {
       return source == other_transfer.source &&
-             host_depth_source == other_transfer.host_depth_source;
+             host_depth_source == other_transfer.host_depth_source &&
+             host_depth_relocated == other_transfer.host_depth_relocated;
     }
 
    private:
@@ -486,6 +495,23 @@ class RenderTargetCache {
   // "striped" way if the depth precision is lost (if this is made always return
   // false).
   virtual bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const = 0;
+
+  // Whether the implementation can perform transfers with host_depth_relocated.
+  //
+  // Games may copy a depth buffer to another place in the EDRAM through color:
+  // reinterpret the depth as color and resolve it to a texture, draw the
+  // texture to a color render target elsewhere, and reinterpret that as depth.
+  // Host depth is tracked per EDRAM range, so with a different host depth
+  // encoding the copy only has the guest value, and later passes comparing the
+  // host fragment depth with it (such as an "equal" pass after a depth
+  // prepass) fail where the guest conversion lost precision. So the depth
+  // render targets most recently reinterpreted as color are remembered, and
+  // when color is reinterpreted as depth, the newest of them with the same
+  // layout as the destination provides host depth at the same position
+  // relative to its base, used only where it matches the guest value. Any host
+  // value matching the guest value is as valid as the guest value, so no
+  // guest-visible value changes.
+  virtual bool IsHostDepthRelocationSupported() const { return false; }
 
   void ResetAccumulatedRenderTargets() { are_accumulated_render_targets_valid_ = false; }
   RenderTarget* const* last_update_accumulated_render_targets() const {
@@ -648,6 +674,11 @@ class RenderTargetCache {
   void ChangeOwnership(RenderTargetKey dest, uint32_t start_tiles_base_relative,
                        uint32_t length_tiles, std::vector<Transfer>* transfers_append_out,
                        const Transfer::Rectangle* resolve_clear_cutout = nullptr);
+  // For IsHostDepthRelocationSupported, the most recently exported depth render
+  // target to use as the relocated host depth source for a color -> depth
+  // transfer to dest, or nullptr.
+  RenderTarget* GetHostDepthRelocationSource(RenderTargetKey dest,
+                                             RenderTargetKey host_depth_source) const;
 
   // If failed to create, may contain nullptr to prevent attempting to create a
   // render target twice.
@@ -660,6 +691,12 @@ class RenderTargetCache {
   // since standard containers use dynamic allocation for elements, though
   // changes to this throughout a frame are pretty rare.
   std::map<uint32_t, OwnershipRange> ownership_ranges_;
+  // Depth render targets with a different host depth encoding whose EDRAM
+  // ranges were most recently taken over by color render targets, newest
+  // first, as host depth sources for IsHostDepthRelocationSupported.
+  std::array<RenderTargetKey, 4> host_depth_exported_to_color_;
+  // ChangeOwnership scratch.
+  std::vector<Transfer> host_depth_relocated_transfers_;
 
   // Render targets actually used by the draw call with the last successful
   // update. 0 is depth, color starting from 1, nullptr if not bound.
