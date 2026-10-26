@@ -15,11 +15,13 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include <SPIRV/GLSL.std.450.h>
+#include <fmt/format.h>
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
@@ -1858,7 +1860,43 @@ uint32_t VulkanRenderTargetCache::GetMaxRenderTargetHeight() const {
   return std::min(device_properties.maxFramebufferHeight, device_properties.maxImageDimension2D);
 }
 
+namespace {
+// log_frame_stats: render target cache steps taking 5 ms or more, with their
+// wall and thread CPU time, to tell waiting from working.
+class SlowStepLog {
+ public:
+  explicit SlowStepLog(std::string what)
+      : what_(std::move(what)),
+        start_us_(rex::perf::frame_stats::enabled() ? rex::perf::frame_stats::NowUs() : 0),
+        start_cpu_us_(start_us_ ? rex::perf::frame_stats::ThreadCpuUs() : 0) {}
+  ~SlowStepLog() {
+    if (!start_us_) {
+      return;
+    }
+    uint64_t us = rex::perf::frame_stats::NowUs() - start_us_;
+    if (us >= 5000) {
+      REXGPU_INFO("frame_stats: render target cache: {} took {:.1f} ms (cpu {:.1f} ms)", what_,
+                  double(us) / 1000.0,
+                  double(rex::perf::frame_stats::ThreadCpuUs() - start_cpu_us_) / 1000.0);
+    }
+  }
+  SlowStepLog(const SlowStepLog&) = delete;
+  SlowStepLog& operator=(const SlowStepLog&) = delete;
+
+ private:
+  std::string what_;
+  uint64_t start_us_;
+  uint64_t start_cpu_us_;
+};
+}  // namespace
+
 RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(RenderTargetKey key) {
+  SlowStepLog slow_step_log(
+      rex::perf::frame_stats::enabled()
+          ? fmt::format("creating render target {} pitch {} tiles base {} msaa {}",
+                        key.GetFormatName(), key.GetPitchTiles(), uint32_t(key.base_tiles),
+                        1u << uint32_t(key.msaa_samples))
+          : std::string());
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
@@ -4276,6 +4314,10 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
     return pipeline_it->second[0] != VK_NULL_HANDLE ? pipeline_it->second.data() : nullptr;
   }
 
+  SlowStepLog slow_step_log(rex::perf::frame_stats::enabled()
+                                ? fmt::format("creating transfer pipelines, mode {}",
+                                              uint32_t(key.shader_key.mode))
+                                : std::string());
   const TransferModeInfo& mode = kTransferModes[size_t(key.shader_key.mode)];
 
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
