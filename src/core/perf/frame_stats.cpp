@@ -41,6 +41,12 @@
 #include <dirent.h>
 #include <sched.h>
 #endif
+#if defined(__FreeBSD__) || defined(__linux__)
+#include <dlfcn.h>
+#include <pthread.h>
+#include <signal.h>
+#include <ucontext.h>
+#endif
 
 #include <fmt/format.h>
 
@@ -76,6 +82,11 @@ REXCVAR_DEFINE_BOOL(log_frame_stats_swap_waits, false, "Perf",
 REXCVAR_DEFINE_BOOL(log_frame_stats_cp_waits, false, "Perf",
                     "With log_frame_stats, also log the command processor's WAIT_REG_MEM "
                     "waits by register or address, once a second");
+
+REXCVAR_DEFINE_INT32(log_frame_stats_swap_samples_ms, 0, "Perf",
+                     "With log_frame_stats, sample the swap thread's host instruction pointer "
+                     "about once a millisecond, and log the samples of every frame at least this "
+                     "long (0: off; FreeBSD and Linux on x86-64)");
 
 REXCVAR_DEFINE_BOOL(log_shader_origins, false, "Perf",
                     "Log physical allocations with their guest callers, file reads into guest "
@@ -658,6 +669,95 @@ ThreadUsage GetThreadUsage() {
   return usage;
 }
 
+
+// log_frame_stats_swap_samples_ms: a thread interrupts the swap thread about
+// once a millisecond with a signal whose handler stores the interrupted
+// instruction pointer in a ring. Only the swap thread writes the ring (in the
+// handler) and reads it (in OnGuestSwap), so the frame's samples are the ones
+// written since the previous swap.
+#if (defined(__linux__) || defined(__FreeBSD__)) && (defined(__x86_64__) || defined(_M_X64))
+#define REX_FRAME_STATS_SAMPLER 1
+constexpr size_t kSwapSampleCount = 4096;
+std::array<uint64_t, kSwapSampleCount> g_swap_samples;
+std::atomic<uint64_t> g_swap_sample_next{0};
+std::atomic<bool> g_swap_pthread_set{false};
+pthread_t g_swap_pthread;
+
+int SwapSampleSignal() {
+  return SIGRTMIN + 4;
+}
+
+void SwapSampleHandler(int, siginfo_t*, void* signal_context) {
+  auto* context = static_cast<ucontext_t*>(signal_context);
+#if defined(__FreeBSD__)
+  uint64_t pc = uint64_t(context->uc_mcontext.mc_rip);
+#else
+  uint64_t pc = uint64_t(context->uc_mcontext.gregs[REG_RIP]);
+#endif
+  uint64_t index = g_swap_sample_next.load(std::memory_order_relaxed);
+  g_swap_samples[index % kSwapSampleCount] = pc;
+  g_swap_sample_next.store(index + 1, std::memory_order_release);
+}
+
+void StartSwapSampler() {
+  struct sigaction action = {};
+  action.sa_sigaction = SwapSampleHandler;
+  action.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SwapSampleSignal(), &action, nullptr)) {
+    REXLOG_WARN("frame_stats: swap samples: sigaction failed");
+    return;
+  }
+  std::thread([] {
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if (REXCVAR_GET(log_frame_stats_swap_samples_ms) > 0 &&
+          g_swap_pthread_set.load(std::memory_order_acquire)) {
+        pthread_kill(g_swap_pthread, SwapSampleSignal());
+      }
+    }
+  }).detach();
+  REXLOG_INFO("frame_stats: swap samples: sampling the swap thread with signal {}",
+              SwapSampleSignal());
+}
+
+// One line for a slow frame: its samples as module+offset with their counts,
+// the most frequent first (up to 48), for the linker map or nm.
+void LogSwapSamples(uint64_t first, uint64_t last, double frame_ms) {
+  if (last - first > kSwapSampleCount) {
+    first = last - kSwapSampleCount;
+  }
+  std::map<uint64_t, uint32_t> counts;
+  for (uint64_t i = first; i < last; ++i) {
+    ++counts[g_swap_samples[i % kSwapSampleCount]];
+  }
+  std::vector<std::pair<uint32_t, uint64_t>> by_count;
+  for (const auto& [pc, count] : counts) {
+    by_count.emplace_back(count, pc);
+  }
+  std::sort(by_count.rbegin(), by_count.rend());
+  std::string line;
+  for (size_t i = 0; i < by_count.size() && i < 48; ++i) {
+    uint64_t pc = by_count[i].second;
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_fname) {
+      const char* name = std::strrchr(info.dli_fname, '/');
+      line += fmt::format(" {}+{:X}", name ? name + 1 : info.dli_fname,
+                          pc - uint64_t(reinterpret_cast<uintptr_t>(info.dli_fbase)));
+    } else {
+      line += fmt::format(" {:X}", pc);
+    }
+    if (by_count[i].first > 1) {
+      line += fmt::format("x{}", by_count[i].first);
+    }
+  }
+  REXLOG_INFO("frame_stats: swap samples {:.1f} ms: {} samples |{}", frame_ms, last - first,
+              line);
+}
+#else
+#define REX_FRAME_STATS_SAMPLER 0
+#endif
+
 void OnGuestSwap() {
   if (!enabled()) {
     return;
@@ -683,6 +783,16 @@ void OnGuestSwap() {
   }
   swap_thread = std::this_thread::get_id();
   g_swap_thread.store(swap_thread, std::memory_order_relaxed);
+#if REX_FRAME_STATS_SAMPLER
+  static uint64_t frame_first_sample = 0;
+  uint64_t frame_last_sample = g_swap_sample_next.load(std::memory_order_acquire);
+  if (REXCVAR_GET(log_frame_stats_swap_samples_ms) > 0) {
+    static std::once_flag sampler_started;
+    std::call_once(sampler_started, StartSwapSampler);
+    g_swap_pthread = pthread_self();
+    g_swap_pthread_set.store(true, std::memory_order_release);
+  }
+#endif
   swap_thread_cpu_us = cpu_us;
   uint64_t now_us = NowUs();
   Totals totals = Snapshot();
@@ -706,6 +816,13 @@ void OnGuestSwap() {
     REXLOG_INFO("frame_stats: slow frame {:.1f} ms | {}", double(frame_us) / 1000.0,
                 FormatStats(totals, last_swap_totals));
   }
+#if REX_FRAME_STATS_SAMPLER
+  int32_t sample_ms = REXCVAR_GET(log_frame_stats_swap_samples_ms);
+  if (sample_ms > 0 && frame_us >= uint64_t(sample_ms) * 1000) {
+    LogSwapSamples(frame_first_sample, frame_last_sample, double(frame_us) / 1000.0);
+  }
+  frame_first_sample = frame_last_sample;
+#endif
   last_swap_us = now_us;
   last_swap_totals = totals;
 
