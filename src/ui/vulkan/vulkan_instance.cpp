@@ -179,6 +179,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     requested_extensions.emplace("VK_EXT_metal_surface",
                                  &vulkan_instance->extensions_.ext_EXT_metal_surface);
 #endif
+#if REX_PLATFORM_PS5
+    // #3. VideoOut has no window system: the driver presents to it as a
+    // display.
+    requested_extensions.emplace("VK_KHR_display", &vulkan_instance->extensions_.ext_KHR_display);
+#endif
   }
 
   std::vector<const char*> enabled_extensions;
@@ -455,6 +460,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
 #ifdef VK_USE_PLATFORM_METAL_EXT
   if (vulkan_instance->extensions_.ext_EXT_metal_surface) {
 #include <rex/ui/vulkan/functions/instance_ext_metal_surface.inc>
+  }
+#endif
+#if REX_PLATFORM_PS5
+  if (vulkan_instance->extensions_.ext_KHR_display) {
+#include <rex/ui/vulkan/functions/instance_khr_display.inc>
   }
 #endif
   if (vulkan_instance->extensions_.ext_KHR_surface) {

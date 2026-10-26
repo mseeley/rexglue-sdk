@@ -149,6 +149,11 @@ class VulkanPresenter final : public Presenter {
   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
 
  private:
+#if REX_PLATFORM_PS5
+  // A display plane surface on the display's mode of the given size.
+  VkResult CreateKhrDisplaySurface(uint32_t width, uint32_t height, VkSurfaceKHR& surface_out);
+#endif
+
   // Usable for both the guest output image itself and for intermediate images.
   class GuestOutputImage {
    public:

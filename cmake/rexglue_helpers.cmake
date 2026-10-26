@@ -49,7 +49,8 @@ endfunction()
 function(rexglue_apply_target_settings target_name)
     if(UNIX AND NOT APPLE)
         # Large executable support
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        # Not on the PS5: see the code model in the top-level CMakeLists.txt.
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND NOT PS5)
             target_link_options(${target_name} PRIVATE -Wl,--no-relax)
             target_compile_options(${target_name} PRIVATE -mcmodel=large)
         elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64")
@@ -95,9 +96,11 @@ endfunction()
 function(rexglue_configure_target target_name)
     cmake_parse_arguments(ARG "" "" "GPU_PLUGINS" ${ARGN})
 
-    target_sources(${target_name} PRIVATE
-        ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp
-        ${REXGLUE_SHARE_DIR}/rex_app.cpp)
+    target_sources(${target_name} PRIVATE ${REXGLUE_SHARE_DIR}/rex_app.cpp)
+    # Without SDL the game provides main() and its WindowedAppContext.
+    if(REXGLUE_USE_SDL)
+        target_sources(${target_name} PRIVATE ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp)
+    endif()
 
     target_compile_definitions(${target_name} PRIVATE
         REXGLUE_BUILD_CONFIG="$<CONFIG>")

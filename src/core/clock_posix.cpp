@@ -21,11 +21,23 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 namespace rex::chrono {
 
+#if defined(__FreeBSD__)
+// FreeBSD has no CLOCK_MONOTONIC_RAW; CLOCK_MONOTONIC never steps (NTP may
+// adjust its rate).
+#define REX_HOST_TICK_CLOCK CLOCK_MONOTONIC
+#else
+#define REX_HOST_TICK_CLOCK CLOCK_MONOTONIC_RAW
+#endif
+
 uint64_t Clock::host_tick_frequency_platform() {
 #ifdef __APPLE__
   mach_timebase_info_data_t info;
   mach_timebase_info(&info);
   return (uint64_t)((1000000000ull * (uint64_t)info.denom) / (uint64_t)info.numer);
+#elif defined(__FreeBSD__)
+  // host_tick_count_platform() counts nanoseconds, whatever clock_getres()
+  // reports as the clock's resolution.
+  return 1000000000ull;
 #else
   timespec res;
   int error = clock_getres(CLOCK_MONOTONIC_RAW, &res);
@@ -46,7 +58,7 @@ uint64_t Clock::host_tick_count_platform() {
   return mach_absolute_time();
 #else
   timespec tp;
-  int error = clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+  int error = clock_gettime(REX_HOST_TICK_CLOCK, &tp);
   assert_zero(error);
 
   return tp.tv_nsec + tp.tv_sec * 1000000000ull;

@@ -1,0 +1,4 @@
+// VK_KHR_display functions used in rex.
+XE_UI_VULKAN_FUNCTION(vkCreateDisplayPlaneSurfaceKHR)
+XE_UI_VULKAN_FUNCTION(vkGetDisplayModePropertiesKHR)
+XE_UI_VULKAN_FUNCTION(vkGetPhysicalDeviceDisplayPropertiesKHR)
